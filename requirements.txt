@@ -1,0 +1,6 @@
+requests
+pandas
+fyers-apiv3
+flask
+pyotp
+pytz

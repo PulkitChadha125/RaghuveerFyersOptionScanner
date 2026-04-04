@@ -1,0 +1,287 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    {% if settings.is_started %}
+    <meta http-equiv="refresh" content="3">
+    {% endif %}
+    <title>Alice Equity Scanner</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+</head>
+<body>
+    <div class="app-shell" id="app-shell">
+        <main class="stock-panel">
+            <header class="topbar">
+                <div>
+                    <h1>Scanner Dashboard</h1>
+                    <p class="subtle">Shows only symbols matching your live criteria</p>
+                </div>
+                <button class="ghost-btn icon-btn" type="button" id="toggle-sidebar-btn" title="Toggle sidebar" aria-label="Toggle sidebar">☰</button>
+                <button class="ghost-btn icon-btn" type="button" id="expand-sidebar-btn" style="display:none;" title="Show settings" aria-label="Show settings">⚙</button>
+            </header>
+            <section class="watchlist-inline">
+                <strong>Watchlist:</strong>
+                {% if watchlist %}
+                    {% for symbol in watchlist %}
+                        <span class="watch-pill">{{ symbol }}</span>
+                    {% endfor %}
+                {% else %}
+                    <span class="subtle">No watchlist symbols yet.</span>
+                {% endif %}
+            </section>
+
+            <section class="view-toggle-row">
+                <button class="ghost-btn active-view-btn icon-btn" type="button" id="watchlist-view-btn" title="Watchlist view" aria-label="Watchlist view">★</button>
+                <button class="ghost-btn icon-btn" type="button" id="all-symbols-view-btn" title="All symbols view" aria-label="All symbols view">◫</button>
+            </section>
+
+            <section class="section-label view-section" id="watchlist-section-label">Watchlist Symbols</section>
+            <section class="table-wrap view-section" id="watchlist-section">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Time</th>
+                            <th>Symbol</th>
+                            <th>LTP</th>
+                            <th>Change %</th>
+                            <th>RelativeVol</th>
+                            <th>Metric</th>
+                            <th>Trade Value (Cr)</th>
+                            <th>Rule</th>
+                            <th>Hits</th>
+                            <th>Watchlist</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% if watchlist_symbols %}
+                            {% for stock in watchlist_symbols %}
+                                <tr>
+                                    <td>{{ stock.time }}</td>
+                                    <td>{{ stock.symbol }}</td>
+                                    <td>{{ stock.ltp }}</td>
+                                    <td>{{ stock.change_pct }}</td>
+                                    <td>{{ stock.relative_vol }}x</td>
+                                    <td>{{ stock.metric_source }}: {{ stock.metric_value }}</td>
+                                    <td>{{ stock.trade_value_cr }}</td>
+                                    <td>{{ stock.condition }}</td>
+                                    <td>{{ stock.hits }}</td>
+                                    <td>
+                                        {% if stock.symbol in watchlist %}
+                                            <button class="watch-icon-btn saved" type="button" title="In watchlist" aria-label="In watchlist">★</button>
+                                        {% else %}
+                                            <form method="post" class="inline-form">
+                                                <input type="hidden" name="action" value="add_watch_symbol">
+                                                <input type="hidden" name="symbol_to_add" value="{{ stock.symbol }}">
+                                                <button class="watch-icon-btn" type="submit" title="Save to watchlist" aria-label="Save to watchlist">☆</button>
+                                            </form>
+                                        {% endif %}
+                                    </td>
+                                </tr>
+                            {% endfor %}
+                        {% else %}
+                            <tr>
+                                <td colspan="10" class="empty-row">No watchlist symbols matching criteria yet.</td>
+                            </tr>
+                        {% endif %}
+                    </tbody>
+                </table>
+            </section>
+
+            <section class="section-label view-section" id="all-symbols-section-label">All Symbols</section>
+            <section class="table-wrap view-section" id="all-symbols-section">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Time</th>
+                            <th>Symbol</th>
+                            <th>LTP</th>
+                            <th>Change %</th>
+                            <th>RelativeVol</th>
+                            <th>Metric</th>
+                            <th>Trade Value (Cr)</th>
+                            <th>Rule</th>
+                            <th>Hits</th>
+                            <th>Watchlist</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% if all_symbols %}
+                            {% for stock in all_symbols %}
+                                <tr>
+                                    <td>{{ stock.time }}</td>
+                                    <td>{{ stock.symbol }}</td>
+                                    <td>{{ stock.ltp }}</td>
+                                    <td>{{ stock.change_pct }}</td>
+                                    <td>{{ stock.relative_vol }}x</td>
+                                    <td>{{ stock.metric_source }}: {{ stock.metric_value }}</td>
+                                    <td>{{ stock.trade_value_cr }}</td>
+                                    <td>{{ stock.condition }}</td>
+                                    <td>{{ stock.hits }}</td>
+                                    <td>
+                                        {% if stock.symbol in watchlist %}
+                                            <button class="watch-icon-btn saved" type="button" title="In watchlist" aria-label="In watchlist">★</button>
+                                        {% else %}
+                                            <form method="post" class="inline-form">
+                                                <input type="hidden" name="action" value="add_watch_symbol">
+                                                <input type="hidden" name="symbol_to_add" value="{{ stock.symbol }}">
+                                                <button class="watch-icon-btn" type="submit" title="Save to watchlist" aria-label="Save to watchlist">☆</button>
+                                            </form>
+                                        {% endif %}
+                                    </td>
+                                </tr>
+                            {% endfor %}
+                        {% else %}
+                            <tr>
+                                <td colspan="10" class="empty-row">No symbols matching criteria yet.</td>
+                            </tr>
+                        {% endif %}
+                    </tbody>
+                </table>
+            </section>
+        </main>
+
+        <aside class="settings-panel">
+            <details class="settings-collapsible" open id="settings-box">
+                <summary class="panel-header" id="collapse-settings-btn">
+                    <h2>Settings</h2>
+                    <span class="collapse-icon" aria-hidden="true"></span>
+                </summary>
+
+                <div class="settings-content">
+                    <nav class="side-menu">
+                        <button class="menu-item active" type="button">Sync History Data</button>
+                        <button class="menu-item" type="button">Tick Query Criteria</button>
+                    </nav>
+
+                    <form method="post" class="settings-form">
+                        <p class="rule-title">Metric source:
+                            <select name="metric_source">
+                                <option value="last_traded_qty" {% if settings.metric_source == "last_traded_qty" %}selected{% endif %}>last_traded_qty</option>
+                                <option value="vol_traded_today" {% if settings.metric_source == "vol_traded_today" %}selected{% endif %}>vol_traded_today</option>
+                            </select>
+                        </p>
+                        <p class="rule-title">1. Volume &gt; <input type="number" min="1" name="rule1_volume_multiplier" value="{{ settings.rule1_volume_multiplier }}"> times SMA <input type="number" min="1" name="rule1_sma_period" value="{{ settings.rule1_sma_period }}"> and Value &gt; <input type="number" min="1" name="rule1_value_cr" value="{{ settings.rule1_value_cr }}"> Cr.</p>
+
+                        <p class="or-divider">OR</p>
+
+                        <p class="rule-title">2. Volume &gt; <input type="number" min="1" name="rule2_volume_multiplier" value="{{ settings.rule2_volume_multiplier }}"> times SMA <input type="number" min="1" name="rule2_sma_period" value="{{ settings.rule2_sma_period }}"> and Value &gt; <input type="number" min="1" name="rule2_value_cr" value="{{ settings.rule2_value_cr }}"> Cr.</p>
+
+                        <div class="action-row">
+                            <button class="secondary-btn" type="submit" name="reset_defaults" value="1">Use Default</button>
+                            <button class="primary-btn" type="submit" name="action" value="save_settings">Save</button>
+                        </div>
+                    </form>
+
+                    <section class="watchlist-card">
+                        <h3>Watchlist</h3>
+                        {% if watchlist %}
+                            {% for symbol in watchlist %}
+                                <form method="post" class="watch-row">
+                                    <input type="hidden" name="action" value="remove_watch_symbol">
+                                    <input type="hidden" name="symbol_to_remove" value="{{ symbol }}">
+                                    <span>{{ symbol }}</span>
+                                    <button type="submit" class="remove-btn">Remove</button>
+                                </form>
+                            {% endfor %}
+                        {% else %}
+                            <p class="subtle">No symbols in watchlist. Save from table.</p>
+                        {% endif %}
+                    </section>
+
+                    <div class="footer-actions">
+                        <p class="engine-config">
+                            Bootstrap symbols: {{ bootstrap_symbol_limit }}<br>
+                            Rate-limit retry: {{ rate_limit_cooldown_secs }}s
+                        </p>
+                        <p class="engine-status">
+                            {{ engine_status.last_message }}
+                            {% if engine_status.last_error %}
+                                - {{ engine_status.last_error }}
+                            {% endif %}
+                        </p>
+                        <div class="event-log">
+                            {% for event in engine_events %}
+                                <div class="event-line">{{ event }}</div>
+                            {% endfor %}
+                        </div>
+                        <form method="post">
+                            <button class="session-btn {{ 'danger' if settings.is_started else '' }}" type="submit" name="action" value="toggle_start">
+                                {{ 'Logout' if settings.is_started else 'Login / Start' }}
+                            </button>
+                        </form>
+                        <form method="post">
+                            <button class="secondary-btn" type="submit" name="action" value="stop_scanner" {% if not settings.is_started %}disabled{% endif %}>
+                                Stop Scanner
+                            </button>
+                        </form>
+                    </div>
+                </div>
+            </details>
+        </aside>
+    </div>
+    <script>
+        const appShell = document.getElementById("app-shell");
+        const toggleBtn = document.getElementById("toggle-sidebar-btn");
+        const expandBtn = document.getElementById("expand-sidebar-btn");
+        const settingsBox = document.getElementById("settings-box");
+        const watchlistViewBtn = document.getElementById("watchlist-view-btn");
+        const allSymbolsViewBtn = document.getElementById("all-symbols-view-btn");
+        const watchlistSection = document.getElementById("watchlist-section");
+        const watchlistSectionLabel = document.getElementById("watchlist-section-label");
+        const allSymbolsSection = document.getElementById("all-symbols-section");
+        const allSymbolsSectionLabel = document.getElementById("all-symbols-section-label");
+        const storageKey = "scanner-sidebar-collapsed";
+        const viewStorageKey = "scanner-table-view";
+
+        const applyCollapsed = (collapsed) => {
+            appShell.classList.toggle("sidebar-collapsed", collapsed);
+            if (collapsed) {
+                settingsBox.removeAttribute("open");
+                expandBtn.style.display = "inline-block";
+                toggleBtn.style.display = "none";
+            } else {
+                settingsBox.setAttribute("open", "open");
+                expandBtn.style.display = "none";
+                toggleBtn.style.display = "inline-block";
+            }
+        };
+
+        applyCollapsed(localStorage.getItem(storageKey) === "1");
+        toggleBtn.addEventListener("click", () => {
+            const collapsed = !appShell.classList.contains("sidebar-collapsed");
+            applyCollapsed(collapsed);
+            localStorage.setItem(storageKey, collapsed ? "1" : "0");
+        });
+        expandBtn.addEventListener("click", () => {
+            applyCollapsed(false);
+            localStorage.setItem(storageKey, "0");
+        });
+        settingsBox.addEventListener("toggle", () => {
+            const collapsed = !settingsBox.open;
+            appShell.classList.toggle("sidebar-collapsed", collapsed);
+            expandBtn.style.display = collapsed ? "inline-block" : "none";
+            toggleBtn.style.display = collapsed ? "none" : "inline-block";
+            localStorage.setItem(storageKey, collapsed ? "1" : "0");
+        });
+
+        const applyView = (viewMode) => {
+            const isWatchlist = viewMode === "watchlist";
+            watchlistSection.style.display = isWatchlist ? "block" : "none";
+            watchlistSectionLabel.style.display = isWatchlist ? "block" : "none";
+            allSymbolsSection.style.display = isWatchlist ? "none" : "block";
+            allSymbolsSectionLabel.style.display = isWatchlist ? "none" : "block";
+            watchlistViewBtn.classList.toggle("active-view-btn", isWatchlist);
+            allSymbolsViewBtn.classList.toggle("active-view-btn", !isWatchlist);
+            localStorage.setItem(viewStorageKey, viewMode);
+        };
+
+        applyView(localStorage.getItem(viewStorageKey) || "all");
+        watchlistViewBtn.addEventListener("click", () => applyView("watchlist"));
+        allSymbolsViewBtn.addEventListener("click", () => applyView("all"));
+    </script>
+</body>
+</html>
