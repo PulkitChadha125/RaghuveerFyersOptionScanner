@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from pathlib import Path
+import threading
+import webbrowser
 
 from flask import Flask, redirect, render_template, request, url_for
 
@@ -25,6 +27,8 @@ DEFAULT_SETTINGS = {
 }
 
 RUNTIME_SETTINGS = DEFAULT_SETTINGS.copy()
+PERSISTED_SHORTLIST: dict[str, dict] = {}
+ENGINE.start_daily_scheduler(sma_period=DEFAULT_SETTINGS["rule1_sma_period"])
 
 
 def parse_int(field_name: str, fallback: int) -> int:
@@ -72,6 +76,8 @@ def home():
                 ENGINE.stop()
                 RUNTIME_SETTINGS["is_started"] = False
             else:
+                # Fresh run: clear previous in-memory UI shortlist cache.
+                PERSISTED_SHORTLIST.clear()
                 ENGINE.start(
                     sma_period=RUNTIME_SETTINGS["rule1_sma_period"],
                     scan_config={
@@ -123,7 +129,12 @@ def home():
 
     status = ENGINE.snapshot()
     RUNTIME_SETTINGS["is_started"] = status.is_running
-    all_symbols = status.shortlisted_rows
+    if status.shortlisted_rows:
+        for row in status.shortlisted_rows:
+            symbol = str(row.get("symbol") or "").strip()
+            if symbol:
+                PERSISTED_SHORTLIST[symbol] = row
+    all_symbols = list(PERSISTED_SHORTLIST.values())
     watchset = set(RUNTIME_SETTINGS["watchlist"])
     watchlist_symbols = [row for row in all_symbols if row.get("symbol") in watchset]
     return render_template(
@@ -140,4 +151,5 @@ def home():
 
 
 if __name__ == "__main__":
+    threading.Timer(1.0, lambda: webbrowser.open("http://127.0.0.1:5000")).start()
     app.run(debug=True, use_reloader=False)

@@ -1,5 +1,7 @@
 requests
 pandas
+polars
+polars-ta
 fyers-apiv3
 flask
 pyotp

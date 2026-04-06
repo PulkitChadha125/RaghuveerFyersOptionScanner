@@ -12,6 +12,8 @@ Install from `requirements.txt`:
 |----------------|------|
 | `requests`     | HTTP calls during Fyers login flow |
 | `pandas`       | CSV/symbol handling, candle frames, timezones (IST) |
+| `polars`       | DataFrame backend used for indicator expression execution |
+| `polars-ta`    | Technical indicator expressions (`ts_mean`) for SMA on volume |
 | `fyers-apiv3`  | Fyers REST (`history`, profile, etc.) and `FyersDataSocket` websocket |
 | `flask`        | Web UI for settings, watchlist, and start/stop |
 | `pyotp`        | TOTP for automated 2FA during login |
@@ -84,18 +86,19 @@ Then open the URL Flask prints (default **http://127.0.0.1:5000**). Use the UI t
    Results are written to **`combinedsymbol.csv`** and upserted into SQLite **`scanner_data.db`** (`symbol_snapshot` table).
 
 4. **Live websocket**  
-   Subscribes to **`SymbolUpdate`** in batches. After the first full **minute boundary** in IST, the live rules run (so the first partial minute after connect is ignored).
+   Subscribes to **`SymbolUpdate`** in batches. Ticks in the **first** IST minute seen on the wire are used only to establish a minute bucket; on the **first clock rollover** to a new minute, in-memory per-minute accumulators are cleared and **`_scan_ready_from_next_minute`** turns on. From that boundary onward, each minute is a fresh bucket (matches your “wait for the next minute, then accumulate” behaviour). State is kept **in process** (Python dicts), not Redis—enough for a single app instance.
 
-5. **Matching rules**  
-   For each tick, the engine reads a configurable **metric** (default `last_traded_qty`; can fall back to `ltq`). For `last_traded_qty`, quantities are **accumulated per symbol per minute** before comparing to the baseline.
+5. **Matching rules (volume / value only)**  
+   For each tick after scan-ready, the engine reads a configurable **metric** (default `last_traded_qty`; can fall back to `ltq`). For `last_traded_qty`, each print’s quantity is **added** into `_minute_accum_metric[symbol]` for the current IST minute; **`effective_qty`** is that running sum until the minute changes.
+
+   On each **new** minute, `_minute_accum_metric` and `_matched_this_minute` are **reset**. If a symbol already matched in the current minute, it is not re-evaluated until the next minute (so you don’t spam the list with the same bar).
 
    Two conditions (C1 / C2) combine:
 
    - **Volume vs baseline:** effective quantity &gt; `ruleN_volume_multiplier × SMA(volume)`  
-   - **Traded value:** `effective_qty × LTP` &gt; `ruleN_value_cr × 1e7` (value expressed in “crore” scale in code)  
-   - **Near day’s high:** `LTP` is at least ~**99.9%** of `high_price` from the tick (when `high_price` is present)
+   - **Traded value:** `effective_qty × LTP` &gt; `ruleN_value_cr × 1e7` (value expressed in “crore” scale in code)
 
-   Defaults in the Flask app: Rule1 uses ×30 volume and 4 Cr; Rule2 uses ×10 volume and 8 Cr. C1 is checked before C2.
+   Defaults in the Flask app: Rule1 uses ×30 volume and 4 Cr; Rule2 uses ×10 volume and 8 Cr. C1 is checked before C2. When a row matches, it is stored in the shortlist shown in the UI (and updated on later hits via hit count where applicable).
 
 6. **Output**  
    Shortlisted symbols (with LTP, change %, relative volume, trade value in Cr, condition, hit count) feed the UI. Recent pipeline/websocket lines are kept in memory for the dashboard.

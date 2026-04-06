@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 from fyers_apiv3.FyersWebsocket import data_ws
@@ -25,9 +26,14 @@ COMBINED_CSV_PATH = BASE_DIR / "combinedsymbol.csv"
 CREDS_PATH = BASE_DIR / "fyers_credentials.json"
 WS_STATE_PATH = BASE_DIR / "runtime_ws_state.json"
 FILENAME_CREDENTIALS = BASE_DIR / "FyersCredentials.csv"
-BOOTSTRAP_SYMBOL_LIMIT = 50
+BOOTSTRAP_SYMBOL_LIMIT = 0
 RATE_LIMIT_COOLDOWN_SECS = 30
 FETCH_INTERVAL_SECS = 0.5
+AUTO_LOGIN_AND_HISTORY_HOUR_IST = 8
+AUTO_LOGIN_AND_HISTORY_MINUTE_IST = 0
+AUTO_WS_START_HOUR_IST = 9
+AUTO_WS_START_MINUTE_IST = 15
+IST_ZONE = ZoneInfo("Asia/Kolkata")
 
 data_socket: data_ws.FyersDataSocket | None = None
 
@@ -92,8 +98,15 @@ class ScannerEngine:
             "watchlist": [],
         }
         self._active_run_id = 0
+        self._scheduler_thread: threading.Thread | None = None
+        self._scheduler_stop_event = threading.Event()
 
-    def start(self, sma_period: int, scan_config: dict[str, Any] | None = None) -> None:
+    def start(
+        self,
+        sma_period: int,
+        scan_config: dict[str, Any] | None = None,
+        websocket_start_at_ist: datetime | None = None,
+    ) -> None:
         with self._lock:
             if self.status.is_running:
                 return
@@ -117,11 +130,29 @@ class ScannerEngine:
                 self._scan_config.update(scan_config)
             self._worker = threading.Thread(
                 target=self._run_pipeline,
-                args=(sma_period, run_id),
+                args=(sma_period, run_id, websocket_start_at_ist),
                 name="scanner-engine",
                 daemon=True,
             )
             self._worker.start()
+
+    def start_daily_scheduler(self, sma_period: int = 1125) -> None:
+        with self._lock:
+            if self._scheduler_thread is not None and self._scheduler_thread.is_alive():
+                return
+            self._scheduler_stop_event.clear()
+            self._scheduler_thread = threading.Thread(
+                target=self._daily_scheduler_loop,
+                args=(sma_period,),
+                name="scanner-daily-scheduler",
+                daemon=True,
+            )
+            self._scheduler_thread.start()
+        self._push_event("Daily auto scheduler enabled (08:00 prep, 09:15 websocket IST).")
+
+    def stop_daily_scheduler(self) -> None:
+        self._scheduler_stop_event.set()
+        self._push_event("Daily auto scheduler stopped.")
 
     def update_scan_config(self, scan_config: dict[str, Any]) -> None:
         with self._lock:
@@ -179,7 +210,12 @@ class ScannerEngine:
             self.status.is_running = False
         self._push_event(f"FAILED: {message}")
 
-    def _run_pipeline(self, sma_period: int, run_id: int) -> None:
+    def _run_pipeline(
+        self,
+        sma_period: int,
+        run_id: int,
+        websocket_start_at_ist: datetime | None = None,
+    ) -> None:
         try:
             self._set_message("Refreshing symbols CSV...", run_id)
             self._refresh_symbols_csv()
@@ -211,6 +247,11 @@ class ScannerEngine:
                 self.stop()
                 return
 
+            if websocket_start_at_ist is not None:
+                self._wait_until_ist(websocket_start_at_ist, run_id)
+                if not self._is_active(run_id):
+                    return
+
             self._set_message("Starting websocket subscriptions...", run_id)
             self._start_websocket(access_token, symbols, run_id)
             self._set_message("Running. Websocket subscribed.", run_id)
@@ -225,8 +266,68 @@ class ScannerEngine:
             return []
         df = pd.read_csv(CSV_PATH)
         all_symbols = [str(x).strip() for x in df.get("symbol_name", []).tolist() if str(x).strip()]
-        # For now bootstrap with last N symbols for faster startup.
+        if BOOTSTRAP_SYMBOL_LIMIT <= 0:
+            return all_symbols
         return all_symbols[-BOOTSTRAP_SYMBOL_LIMIT:]
+
+    def _daily_scheduler_loop(self, sma_period: int) -> None:
+        while not self._scheduler_stop_event.is_set():
+            next_prep = self._next_ist_occurrence(
+                hour=AUTO_LOGIN_AND_HISTORY_HOUR_IST,
+                minute=AUTO_LOGIN_AND_HISTORY_MINUTE_IST,
+            )
+            now_ist = datetime.now(IST_ZONE)
+            wait_seconds = max((next_prep - now_ist).total_seconds(), 0)
+            self._push_event(
+                f"Auto run scheduled at {next_prep.strftime('%Y-%m-%d %H:%M:%S IST')} "
+                f"(in {int(wait_seconds)}s)."
+            )
+            if self._scheduler_stop_event.wait(wait_seconds):
+                return
+
+            if self.status.is_running:
+                self._push_event("Skipped auto start because scanner is already running.")
+                continue
+
+            ws_start_at = next_prep.replace(
+                hour=AUTO_WS_START_HOUR_IST,
+                minute=AUTO_WS_START_MINUTE_IST,
+                second=0,
+                microsecond=0,
+            )
+            self._push_event(
+                "Auto start triggered: logging in and fetching historical data now. "
+                f"Websocket will start at {ws_start_at.strftime('%H:%M IST')}."
+            )
+            self.start(sma_period=sma_period, websocket_start_at_ist=ws_start_at)
+
+            while self.status.is_running and not self._scheduler_stop_event.is_set():
+                time.sleep(5)
+
+    def _next_ist_occurrence(self, hour: int, minute: int) -> datetime:
+        now_ist = datetime.now(IST_ZONE)
+        target = now_ist.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        if now_ist >= target:
+            target = target + timedelta(days=1)
+        return target
+
+    def _wait_until_ist(self, target_dt_ist: datetime, run_id: int) -> None:
+        target = (
+            target_dt_ist.replace(tzinfo=IST_ZONE)
+            if target_dt_ist.tzinfo is None
+            else target_dt_ist.astimezone(IST_ZONE)
+        )
+        while self._is_active(run_id) and not self._stop_event.is_set():
+            now_ist = datetime.now(IST_ZONE)
+            remaining = (target - now_ist).total_seconds()
+            if remaining <= 0:
+                return
+            self._set_message(
+                f"Historical data ready. Waiting for websocket start at "
+                f"{target.strftime('%H:%M:%S IST')} ({int(remaining)}s left)...",
+                run_id,
+            )
+            time.sleep(min(30, max(1, remaining)))
 
     def _load_fyers_credentials_csv(self) -> dict[str, str]:
         if not FILENAME_CREDENTIALS.exists():
@@ -278,12 +379,13 @@ class ScannerEngine:
         sma_period: int,
         run_id: int,
     ) -> list[dict[str, Any]]:
-        yesterday = date.today() - timedelta(days=1)
-        # Roughly 390 minutes of 1-min bars per trading day.
-        days_back = max(5, int(sma_period / 390) + 3)
+        today_ist = pd.Timestamp.now(tz="Asia/Kolkata").date()
+        # Fetch extra calendar days so we reliably get >= sma_period completed 1-min candles.
+        trading_minutes_per_day = 375
+        days_back = max(14, int(sma_period / trading_minutes_per_day) + 10)
         range_from_dt = date.today() - timedelta(days=days_back)
         range_from = range_from_dt.strftime("%Y-%m-%d")
-        range_to = yesterday.strftime("%Y-%m-%d")
+        range_to = today_ist.strftime("%Y-%m-%d")
         rows: list[dict[str, Any]] = []
 
         total = len(symbols)
@@ -312,21 +414,24 @@ class ScannerEngine:
             frame["ts"] = pd.to_datetime(frame["timestamp"], unit="s", utc=True).dt.tz_convert(
                 "Asia/Kolkata"
             )
-            frame = frame[frame["ts"].dt.date <= yesterday].copy()
+            # Strict baseline mode: remove all current-day candles (IST).
+            frame = frame[frame["ts"].dt.date < today_ist].copy()
             if frame.empty:
                 continue
 
             frame["volume"] = pd.to_numeric(frame["volume"], errors="coerce").fillna(0.0)
-            # Use available candles if full SMA window is not available yet.
+            # Match chart parameter: SMA(length=sma_period) on 1-min volume bars.
             frame["sma_volume"] = (
-                frame["volume"].rolling(window=sma_period, min_periods=1).mean()
+                frame["volume"].rolling(window=sma_period, min_periods=sma_period).mean()
             )
-            # If yesterday has no candles (holiday/weekend), use latest available row.
-            frame_yesterday = frame[frame["ts"].dt.date == yesterday]
-            if frame_yesterday.empty:
-                last_row = frame.iloc[-1]
-            else:
-                last_row = frame_yesterday.iloc[-1]
+
+            # Use latest completed candle (previous trading day close candle).
+            last_row = frame.iloc[-1]
+            if pd.isna(last_row["sma_volume"]):
+                # If history is shorter than sma_period, average available completed bars.
+                last_row = last_row.copy()
+                lookback = min(len(frame), max(sma_period, 1))
+                last_row["sma_volume"] = float(frame["volume"].tail(lookback).mean())
             row_ts = last_row["ts"].strftime("%Y-%m-%d %H:%M:%S")
             row_close = float(last_row["close"])
             row_volume = float(last_row["volume"])
@@ -339,6 +444,10 @@ class ScannerEngine:
                 {
                     "symbol_name": symbol,
                     "sma_value": float(last_row["sma_volume"])
+                    if pd.notna(last_row["sma_volume"])
+                    else None,
+                    "sma_period": int(sma_period),
+                    "sma_volume": float(last_row["sma_volume"])
                     if pd.notna(last_row["sma_volume"])
                     else None,
                     "volume_value": float(last_row["volume"]),
@@ -411,6 +520,8 @@ class ScannerEngine:
                 fieldnames=[
                     "symbol_name",
                     "sma_value",
+                    "sma_period",
+                    "sma_volume",
                     "volume_value",
                     "timestamp",
                     "open",
@@ -517,6 +628,8 @@ class ScannerEngine:
             symbol = message.get("symbol")
             ltp = message.get("ltp")
             volume = message.get("vol_traded_today")
+            last_traded_qty = message.get("last_traded_qty")
+            ltq = message.get("ltq")
             bid = message.get("bid_price")
             ask = message.get("ask_price")
             exch_time = message.get("exch_feed_time") or message.get("last_traded_time")
@@ -526,6 +639,7 @@ class ScannerEngine:
                 self._push_event(
                     "WS PARSED "
                     f"symbol={symbol}, ltp={ltp}, vol_traded_today={volume}, "
+                    f"last_traded_qty={last_traded_qty}, ltq={ltq}, "
                     f"bid={bid}, ask={ask}, exch_time={exch_time}"
                 )
 
@@ -598,7 +712,6 @@ class ScannerEngine:
             ltp = float(message.get("ltp"))
             sma_value = float(base.get("sma_value") or 0.0)
             base_close = float(base.get("close") or 0.0)
-            high_price = float(message.get("high_price") or 0.0)
         except (TypeError, ValueError):
             return
 
@@ -618,16 +731,13 @@ class ScannerEngine:
         trade_value = effective_qty * ltp
         relative_vol = (effective_qty / sma_value) if sma_value > 0 else 0.0
         change_pct = ((ltp - base_close) / base_close * 100.0) if base_close > 0 else 0.0
-        high_hit = high_price <= 0 or ltp >= (high_price * 0.999)
         condition1 = (
             effective_qty > (rule1_mult * sma_value)
             and trade_value > (rule1_value_cr * 1e7)
-            and high_hit
         )
         condition2 = (
             effective_qty > (rule2_mult * sma_value)
             and trade_value > (rule2_value_cr * 1e7)
-            and high_hit
         )
 
         matched_condition = ""
@@ -674,8 +784,7 @@ class ScannerEngine:
         self._push_event(
             f"SHORTLISTED {symbol} via {matched_condition} "
             f"({metric_source}={effective_qty:.2f}, rel_vol={relative_vol:.2f}x, "
-            f"trade_value={trade_value/1e7:.2f} Cr, hits={self._hit_count.get(symbol, 1)}, "
-            f"high_hit={high_hit})"
+            f"trade_value={trade_value/1e7:.2f} Cr, hits={self._hit_count.get(symbol, 1)})"
         )
 
     def _to_ist_minute_key(self, epoch_ts: Any) -> str | None:
