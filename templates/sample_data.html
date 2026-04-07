@@ -37,6 +37,7 @@
                             <th>Symbol</th>
                             <th>Last Traded Qty</th>
                             <th>Last Traded Qty Sum (Minute)</th>
+                            <th>Trade Value Sum (Minute)</th>
                             <th>Trade Value Sum (Minute, Cr)</th>
                             <th>SMA Volume</th>
                             <th>Timestamp</th>
@@ -49,6 +50,7 @@
                                     <td>{{ row.symbol }}</td>
                                     <td>{{ row.last_traded_qty if row.last_traded_qty is not none else "-" }}</td>
                                     <td>{{ row.ltq_sum }}</td>
+                                    <td>{{ row.trade_value_sum }}</td>
                                     <td>{{ row.trade_value_sum_cr }}</td>
                                     <td>{{ row.sma_value }}</td>
                                     <td>{{ row.exch_time }}</td>
@@ -56,7 +58,7 @@
                             {% endfor %}
                         {% else %}
                             <tr>
-                                <td colspan="6" class="empty-row">No sample rows yet. Start scanner and wait for baseline load.</td>
+                                <td colspan="7" class="empty-row">No sample rows yet. Start scanner and wait for baseline load.</td>
                             </tr>
                         {% endif %}
                     </tbody>
@@ -123,6 +125,7 @@
                     <td>${row.symbol ?? "-"}</td>
                     <td>${row.last_traded_qty ?? "-"}</td>
                     <td>${row.ltq_sum ?? "-"}</td>
+                    <td>${row.trade_value_sum ?? "-"}</td>
                     <td>${row.trade_value_sum_cr ?? "-"}</td>
                     <td>${row.sma_value ?? "-"}</td>
                     <td>${row.exch_time ?? "-"}</td>

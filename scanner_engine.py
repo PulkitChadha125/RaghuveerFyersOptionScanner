@@ -203,6 +203,9 @@ class ScannerEngine:
                     {
                         "symbol": symbol,
                         "ltq_sum": round(ltq_sum, 2),
+                        "trade_value_sum": round(
+                            float(self._minute_trade_value_sum.get(symbol, 0.0)), 2
+                        ),
                         "trade_value_sum_cr": round(
                             float(self._minute_trade_value_sum.get(symbol, 0.0)) / 1e7, 4
                         ),
