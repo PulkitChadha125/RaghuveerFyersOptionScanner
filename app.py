@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
 import threading
 import webbrowser
 
-from flask import Flask, redirect, render_template, request, url_for
+from flask import Flask, jsonify, redirect, render_template, request, url_for
 
 from main import OUTPUT_CSV
 from scanner_engine import BOOTSTRAP_SYMBOL_LIMIT, ENGINE, RATE_LIMIT_COOLDOWN_SECS
@@ -37,6 +38,14 @@ def parse_int(field_name: str, fallback: int) -> int:
         return max(int(raw_value), 1)
     except ValueError:
         return fallback
+
+
+def row_time_sort_key(row: dict) -> datetime:
+    raw = str(row.get("time") or "").strip()
+    try:
+        return datetime.strptime(raw, "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return datetime.min
 
 
 @app.route("/", methods=["GET", "POST"])
@@ -134,7 +143,11 @@ def home():
             symbol = str(row.get("symbol") or "").strip()
             if symbol:
                 PERSISTED_SHORTLIST[symbol] = row
-    all_symbols = list(PERSISTED_SHORTLIST.values())
+    all_symbols = sorted(
+        PERSISTED_SHORTLIST.values(),
+        key=row_time_sort_key,
+        reverse=True,
+    )
     watchset = set(RUNTIME_SETTINGS["watchlist"])
     watchlist_symbols = [row for row in all_symbols if row.get("symbol") in watchset]
     return render_template(
@@ -150,6 +163,50 @@ def home():
     )
 
 
+@app.route("/sample-data", methods=["GET"])
+def sample_data():
+    status = ENGINE.snapshot()
+    RUNTIME_SETTINGS["is_started"] = status.is_running
+    minute_key, rows = ENGINE.sample_data_snapshot()
+    return render_template(
+        "sample_data.html",
+        settings=RUNTIME_SETTINGS,
+        engine_status=status,
+        minute_key=minute_key,
+        sample_rows=rows,
+    )
+
+
+@app.route("/api/dashboard-data", methods=["GET"])
+def dashboard_data():
+    status = ENGINE.snapshot()
+    if status.shortlisted_rows:
+        for row in status.shortlisted_rows:
+            symbol = str(row.get("symbol") or "").strip()
+            if symbol:
+                PERSISTED_SHORTLIST[symbol] = row
+    all_symbols = sorted(PERSISTED_SHORTLIST.values(), key=row_time_sort_key, reverse=True)
+    watchset = set(RUNTIME_SETTINGS["watchlist"])
+    watchlist_symbols = [row for row in all_symbols if row.get("symbol") in watchset]
+    return jsonify(
+        {
+            "is_started": status.is_running,
+            "last_message": status.last_message,
+            "last_error": status.last_error,
+            "events": status.recent_events,
+            "watchlist": RUNTIME_SETTINGS["watchlist"],
+            "watchlist_symbols": watchlist_symbols,
+            "all_symbols": all_symbols,
+        }
+    )
+
+
+@app.route("/api/sample-data", methods=["GET"])
+def sample_data_api():
+    minute_key, rows = ENGINE.sample_data_snapshot()
+    return jsonify({"minute_key": minute_key, "rows": rows})
+
+
 if __name__ == "__main__":
     threading.Timer(1.0, lambda: webbrowser.open("http://127.0.0.1:5000")).start()
-    app.run(debug=True, use_reloader=False)
+    app.run(host="0.0.0.0", port=5000, debug=True, use_reloader=False)

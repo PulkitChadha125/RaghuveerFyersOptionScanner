@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Sample Data - Scanner</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+</head>
+<body>
+    <div class="app-shell" id="app-shell">
+        <main class="stock-panel">
+            <header class="topbar">
+                <div>
+                    <h1>Sample Data</h1>
+                    <p class="subtle">Per-symbol minute LTQ sum vs baseline SMA</p>
+                    <p class="subtle">Current minute bucket: <strong id="minute-key-text">{{ minute_key }}</strong></p>
+                    <p class="subtle"><a href="{{ url_for('home') }}">Back to scanner dashboard</a></p>
+                </div>
+            </header>
+
+            <section class="section-label">All Subscribed Symbols ({{ sample_rows|length }})</section>
+            <section style="margin: 8px 0 12px 0;">
+                <input
+                    id="symbol-search-input"
+                    type="text"
+                    placeholder="Search symbol (e.g. NSE:UPL-EQ)"
+                    style="width: 100%; max-width: 420px; padding: 8px 10px; border: 1px solid #cfd4dc; border-radius: 8px;"
+                >
+            </section>
+            <section class="table-wrap" id="sample-table-wrap">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Symbol</th>
+                            <th>Last Traded Qty</th>
+                            <th>Last Traded Qty Sum (Minute)</th>
+                            <th>Trade Value Sum (Minute, Cr)</th>
+                            <th>SMA Volume</th>
+                            <th>Timestamp</th>
+                        </tr>
+                    </thead>
+                    <tbody id="sample-table-body">
+                        {% if sample_rows %}
+                            {% for row in sample_rows %}
+                                <tr data-symbol="{{ row.symbol|lower }}">
+                                    <td>{{ row.symbol }}</td>
+                                    <td>{{ row.last_traded_qty if row.last_traded_qty is not none else "-" }}</td>
+                                    <td>{{ row.ltq_sum }}</td>
+                                    <td>{{ row.trade_value_sum_cr }}</td>
+                                    <td>{{ row.sma_value }}</td>
+                                    <td>{{ row.exch_time }}</td>
+                                </tr>
+                            {% endfor %}
+                        {% else %}
+                            <tr>
+                                <td colspan="6" class="empty-row">No sample rows yet. Start scanner and wait for baseline load.</td>
+                            </tr>
+                        {% endif %}
+                    </tbody>
+                </table>
+            </section>
+        </main>
+    </div>
+    <script>
+        const windowScrollKey = "scanner-sample-window-scroll-y";
+        const tableScrollKey = "scanner-sample-table-scroll-top";
+        const searchQueryKey = "scanner-sample-search-query";
+        const tableWrap = document.getElementById("sample-table-wrap");
+        const searchInput = document.getElementById("symbol-search-input");
+        const tableBody = document.getElementById("sample-table-body");
+        const minuteKeyText = document.getElementById("minute-key-text");
+
+        const rememberScroll = () => {
+            localStorage.setItem(windowScrollKey, String(window.scrollY || 0));
+            if (tableWrap) {
+                localStorage.setItem(tableScrollKey, String(tableWrap.scrollTop || 0));
+            }
+        };
+
+        window.addEventListener("beforeunload", rememberScroll);
+
+        const restoreScroll = () => {
+            const y = parseInt(localStorage.getItem(windowScrollKey) || "0", 10);
+            const tableTop = parseInt(localStorage.getItem(tableScrollKey) || "0", 10);
+            window.scrollTo(0, Number.isNaN(y) ? 0 : y);
+            if (tableWrap && !Number.isNaN(tableTop)) {
+                tableWrap.scrollTop = tableTop;
+            }
+        };
+
+        restoreScroll();
+
+        const applySearchFilter = () => {
+            if (!tableBody || !searchInput) return;
+            const query = (searchInput.value || "").trim().toLowerCase();
+            const rows = tableBody.querySelectorAll("tr[data-symbol]");
+            rows.forEach((row) => {
+                const symbol = row.getAttribute("data-symbol") || "";
+                row.style.display = symbol.includes(query) ? "" : "none";
+            });
+        };
+
+        if (searchInput) {
+            searchInput.value = localStorage.getItem(searchQueryKey) || "";
+            searchInput.addEventListener("input", () => {
+                localStorage.setItem(searchQueryKey, searchInput.value || "");
+                applySearchFilter();
+            });
+            applySearchFilter();
+        }
+
+        const renderSampleRows = (rows) => {
+            if (!tableBody) return;
+            if (!rows || rows.length === 0) {
+                tableBody.innerHTML = '<tr><td colspan="5" class="empty-row">No sample rows yet. Start scanner and wait for baseline load.</td></tr>';
+                return;
+            }
+            tableBody.innerHTML = rows.map((row) => `
+                <tr data-symbol="${String(row.symbol || "").toLowerCase()}">
+                    <td>${row.symbol ?? "-"}</td>
+                    <td>${row.last_traded_qty ?? "-"}</td>
+                    <td>${row.ltq_sum ?? "-"}</td>
+                    <td>${row.trade_value_sum_cr ?? "-"}</td>
+                    <td>${row.sma_value ?? "-"}</td>
+                    <td>${row.exch_time ?? "-"}</td>
+                </tr>
+            `).join("");
+            applySearchFilter();
+        };
+
+        const pollSampleData = async () => {
+            try {
+                const resp = await fetch("/api/sample-data", { cache: "no-store" });
+                if (!resp.ok) return;
+                const data = await resp.json();
+                if (minuteKeyText && data.minute_key) {
+                    minuteKeyText.textContent = data.minute_key;
+                }
+                renderSampleRows(data.rows || []);
+            } catch (_) {
+                // keep current UI on transient polling failure
+            }
+        };
+
+        setInterval(pollSampleData, 1000);
+    </script>
+</body>
+</html>

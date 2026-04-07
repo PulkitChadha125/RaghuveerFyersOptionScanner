@@ -28,7 +28,7 @@ WS_STATE_PATH = BASE_DIR / "runtime_ws_state.json"
 FILENAME_CREDENTIALS = BASE_DIR / "FyersCredentials.csv"
 BOOTSTRAP_SYMBOL_LIMIT = 0
 RATE_LIMIT_COOLDOWN_SECS = 30
-FETCH_INTERVAL_SECS = 0.5
+FETCH_INTERVAL_SECS = 0.3
 AUTO_LOGIN_AND_HISTORY_HOUR_IST = 8
 AUTO_LOGIN_AND_HISTORY_MINUTE_IST = 0
 AUTO_WS_START_HOUR_IST = 9
@@ -85,10 +85,13 @@ class ScannerEngine:
         self._shortlisted: dict[str, dict[str, Any]] = {}
         self._hit_count: dict[str, int] = {}
         self._minute_accum_metric: dict[str, float] = {}
+        self._minute_ltq_sum: dict[str, float] = {}
+        self._minute_trade_value_sum: dict[str, float] = {}
         self._matched_this_minute: set[str] = set()
         self._current_minute_key: str | None = None
         self._startup_minute_key: str | None = None
         self._scan_ready_from_next_minute = False
+        self._last_tick_by_symbol: dict[str, dict[str, Any]] = {}
         self._scan_config: dict[str, Any] = {
             "rule1_volume_multiplier": 30,
             "rule1_value_cr": 4,
@@ -122,10 +125,13 @@ class ScannerEngine:
             self._shortlisted = {}
             self._hit_count = {}
             self._minute_accum_metric = {}
+            self._minute_ltq_sum = {}
+            self._minute_trade_value_sum = {}
             self._matched_this_minute = set()
             self._current_minute_key = None
             self._startup_minute_key = None
             self._scan_ready_from_next_minute = False
+            self._last_tick_by_symbol = {}
             if scan_config:
                 self._scan_config.update(scan_config)
             self._worker = threading.Thread(
@@ -183,6 +189,31 @@ class ScannerEngine:
                 recent_events=list(self._recent_events),
                 shortlisted_rows=list(self._shortlisted.values())[:300],
             )
+
+    def sample_data_snapshot(self) -> tuple[str, list[dict[str, Any]]]:
+        with self._lock:
+            minute_key = self._current_minute_key or "--"
+            rows: list[dict[str, Any]] = []
+            for symbol in sorted(self._baseline_by_symbol.keys()):
+                base = self._baseline_by_symbol.get(symbol, {})
+                tick = self._last_tick_by_symbol.get(symbol, {})
+                ltq_sum = float(self._minute_ltq_sum.get(symbol, 0.0))
+                sma_value = float(base.get("sma_value") or 0.0)
+                rows.append(
+                    {
+                        "symbol": symbol,
+                        "ltq_sum": round(ltq_sum, 2),
+                        "trade_value_sum_cr": round(
+                            float(self._minute_trade_value_sum.get(symbol, 0.0)) / 1e7, 4
+                        ),
+                        "sma_value": round(sma_value, 2),
+                        "relative_vs_sma": round((ltq_sum / sma_value), 3) if sma_value > 0 else 0.0,
+                        "last_traded_qty": tick.get("last_traded_qty"),
+                        "ltp": tick.get("ltp"),
+                        "exch_time": tick.get("exch_time", "--"),
+                    }
+                )
+            return minute_key, rows
 
     def _is_active(self, run_id: int) -> bool:
         with self._lock:
@@ -393,7 +424,7 @@ class ScannerEngine:
             if self._stop_event.is_set() or not self._is_active(run_id):
                 break
 
-            if idx > 1:
+            if idx > 1 and FETCH_INTERVAL_SECS > 0:
                 time.sleep(FETCH_INTERVAL_SECS)
 
             self._set_message(f"Historical {idx}/{total}: {symbol}", run_id)
@@ -622,27 +653,6 @@ class ScannerEngine:
             if not self._is_active(run_id):
                 return
             self._ws_msg_count += 1
-            if self._ws_msg_count <= 12:
-                self._push_event(f"WS RAW #{self._ws_msg_count}: {message}")
-
-            symbol = message.get("symbol")
-            ltp = message.get("ltp")
-            volume = message.get("vol_traded_today")
-            last_traded_qty = message.get("last_traded_qty")
-            ltq = message.get("ltq")
-            bid = message.get("bid_price")
-            ask = message.get("ask_price")
-            exch_time = message.get("exch_feed_time") or message.get("last_traded_time")
-
-            # Log concise parsed fields for readability.
-            if symbol is not None or ltp is not None:
-                self._push_event(
-                    "WS PARSED "
-                    f"symbol={symbol}, ltp={ltp}, vol_traded_today={volume}, "
-                    f"last_traded_qty={last_traded_qty}, ltq={ltq}, "
-                    f"bid={bid}, ask={ask}, exch_time={exch_time}"
-                )
-
             self._apply_scanner_rules(message)
 
         def on_error(message: Any) -> None:
@@ -692,23 +702,44 @@ class ScannerEngine:
         if not base:
             return
 
-        metric_source = str(self._scan_config.get("metric_source", "last_traded_qty"))
-        metric_value = message.get(metric_source)
-        if metric_value is None and metric_source == "last_traded_qty":
-            metric_value = message.get("ltq")
-        if metric_value is None:
-            return
-
         raw_ts = message.get("exch_feed_time") or message.get("last_traded_time")
         minute_key = self._to_ist_minute_key(raw_ts)
         if minute_key is None:
             return
         self._roll_minute_if_needed(minute_key)
+
+        raw_ltq = message.get("last_traded_qty")
+        if raw_ltq is None:
+            raw_ltq = message.get("ltq")
+        parsed_ltq: float | None = None
+        try:
+            if raw_ltq is not None:
+                parsed_ltq = max(float(raw_ltq), 0.0)
+        except (TypeError, ValueError):
+            parsed_ltq = None
+
+        self._last_tick_by_symbol[symbol] = {
+            "last_traded_qty": parsed_ltq,
+            "exch_time": self._to_ist_second_str(raw_ts),
+        }
+        ltp_value: float | None = None
+        try:
+            if message.get("ltp") is not None:
+                ltp_value = float(message.get("ltp"))
+        except (TypeError, ValueError):
+            ltp_value = None
+
+        if parsed_ltq is not None:
+            self._minute_ltq_sum[symbol] = self._minute_ltq_sum.get(symbol, 0.0) + parsed_ltq
+            if ltp_value is not None:
+                self._minute_trade_value_sum[symbol] = (
+                    self._minute_trade_value_sum.get(symbol, 0.0) + (ltp_value * parsed_ltq)
+                )
+
         if not self._scan_ready_from_next_minute:
             return
 
         try:
-            qty_value = float(metric_value)
             ltp = float(message.get("ltp"))
             sma_value = float(base.get("sma_value") or 0.0)
             base_close = float(base.get("close") or 0.0)
@@ -720,15 +751,13 @@ class ScannerEngine:
         rule2_mult = float(self._scan_config.get("rule2_volume_multiplier", 10))
         rule2_value_cr = float(self._scan_config.get("rule2_value_cr", 8))
 
-        # Minute-level accumulation for LTQ mode: keep adding until minute rollover.
-        if metric_source == "last_traded_qty":
-            current_acc = self._minute_accum_metric.get(symbol, 0.0) + max(qty_value, 0.0)
-            self._minute_accum_metric[symbol] = current_acc
-            effective_qty = current_acc
-        else:
-            effective_qty = max(qty_value, 0.0)
+        # Always use minute LTQ sum for real-time condition checks.
+        effective_qty = self._minute_ltq_sum.get(symbol, 0.0)
+        self._minute_accum_metric[symbol] = effective_qty
+        if effective_qty <= 0:
+            return
 
-        trade_value = effective_qty * ltp
+        trade_value = self._minute_trade_value_sum.get(symbol, 0.0)
         relative_vol = (effective_qty / sma_value) if sma_value > 0 else 0.0
         change_pct = ((ltp - base_close) / base_close * 100.0) if base_close > 0 else 0.0
         condition1 = (
@@ -773,7 +802,7 @@ class ScannerEngine:
             "ltp": round(ltp, 2),
             "change_pct": f"{change_pct:+.2f}%",
             "metric_value": round(effective_qty, 2),
-            "metric_source": metric_source,
+            "metric_source": "last_traded_qty",
             "relative_vol": round(relative_vol, 2),
             "trade_value_cr": round(trade_value / 1e7, 3),
             "condition": matched_condition,
@@ -783,7 +812,7 @@ class ScannerEngine:
 
         self._push_event(
             f"SHORTLISTED {symbol} via {matched_condition} "
-            f"({metric_source}={effective_qty:.2f}, rel_vol={relative_vol:.2f}x, "
+            f"(last_traded_qty={effective_qty:.2f}, rel_vol={relative_vol:.2f}x, "
             f"trade_value={trade_value/1e7:.2f} Cr, hits={self._hit_count.get(symbol, 1)})"
         )
 
@@ -791,13 +820,17 @@ class ScannerEngine:
         try:
             if epoch_ts is None:
                 return None
-            return (
-                pd.to_datetime(int(epoch_ts), unit="s", utc=True)
-                .tz_convert("Asia/Kolkata")
-                .strftime("%Y-%m-%d %H:%M")
-            )
+            return datetime.fromtimestamp(int(epoch_ts), tz=IST_ZONE).strftime("%Y-%m-%d %H:%M")
         except Exception:  # noqa: BLE001
             return None
+
+    def _to_ist_second_str(self, epoch_ts: Any) -> str:
+        try:
+            if epoch_ts is None:
+                return "--"
+            return datetime.fromtimestamp(int(epoch_ts), tz=IST_ZONE).strftime("%Y-%m-%d %H:%M:%S")
+        except Exception:  # noqa: BLE001
+            return "--"
 
     def _roll_minute_if_needed(self, minute_key: str) -> None:
         if self._current_minute_key is None:
@@ -808,6 +841,8 @@ class ScannerEngine:
 
         self._current_minute_key = minute_key
         self._minute_accum_metric = {}
+        self._minute_ltq_sum = {}
+        self._minute_trade_value_sum = {}
         self._matched_this_minute = set()
         if not self._scan_ready_from_next_minute:
             self._scan_ready_from_next_minute = True

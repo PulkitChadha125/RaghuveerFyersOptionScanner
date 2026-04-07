@@ -3,9 +3,6 @@
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    {% if settings.is_started %}
-    <meta http-equiv="refresh" content="3">
-    {% endif %}
     <title>Alice Equity Scanner</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -19,6 +16,7 @@
                 <div>
                     <h1>Scanner Dashboard</h1>
                     <p class="subtle">Shows only symbols matching your live criteria</p>
+                    <p class="subtle"><a href="{{ url_for('sample_data') }}">Open sample data page</a></p>
                 </div>
                 <button class="ghost-btn icon-btn" type="button" id="toggle-sidebar-btn" title="Toggle sidebar" aria-label="Toggle sidebar">☰</button>
                 <button class="ghost-btn icon-btn" type="button" id="expand-sidebar-btn" style="display:none;" title="Show settings" aria-label="Show settings">⚙</button>
@@ -56,7 +54,7 @@
                             <th>Watchlist</th>
                         </tr>
                     </thead>
-                    <tbody>
+                    <tbody id="watchlist-table-body">
                         {% if watchlist_symbols %}
                             {% for stock in watchlist_symbols %}
                                 <tr>
@@ -108,7 +106,7 @@
                             <th>Watchlist</th>
                         </tr>
                     </thead>
-                    <tbody>
+                    <tbody id="all-symbols-table-body">
                         {% if all_symbols %}
                             {% for stock in all_symbols %}
                                 <tr>
@@ -197,13 +195,13 @@
                             Bootstrap symbols: {{ bootstrap_symbol_limit }}<br>
                             Rate-limit retry: {{ rate_limit_cooldown_secs }}s
                         </p>
-                        <p class="engine-status">
+                        <p class="engine-status" id="engine-status-text">
                             {{ engine_status.last_message }}
                             {% if engine_status.last_error %}
                                 - {{ engine_status.last_error }}
                             {% endif %}
                         </p>
-                        <div class="event-log">
+                        <div class="event-log" id="event-log">
                             {% for event in engine_events %}
                                 <div class="event-line">{{ event }}</div>
                             {% endfor %}
@@ -234,8 +232,15 @@
         const watchlistSectionLabel = document.getElementById("watchlist-section-label");
         const allSymbolsSection = document.getElementById("all-symbols-section");
         const allSymbolsSectionLabel = document.getElementById("all-symbols-section-label");
+        const watchlistTableBody = document.getElementById("watchlist-table-body");
+        const allSymbolsTableBody = document.getElementById("all-symbols-table-body");
+        const engineStatusText = document.getElementById("engine-status-text");
+        const eventLog = document.getElementById("event-log");
         const storageKey = "scanner-sidebar-collapsed";
         const viewStorageKey = "scanner-table-view";
+        const windowScrollKey = "scanner-window-scroll-y";
+        const allSectionScrollKey = "scanner-all-section-scroll-top";
+        const watchSectionScrollKey = "scanner-watch-section-scroll-top";
 
         const applyCollapsed = (collapsed) => {
             appShell.classList.toggle("sidebar-collapsed", collapsed);
@@ -282,6 +287,97 @@
         applyView(localStorage.getItem(viewStorageKey) || "all");
         watchlistViewBtn.addEventListener("click", () => applyView("watchlist"));
         allSymbolsViewBtn.addEventListener("click", () => applyView("all"));
+
+        // Preserve scroll position across auto-refresh so users stay where they are.
+        const rememberScroll = () => {
+            localStorage.setItem(windowScrollKey, String(window.scrollY || 0));
+            if (allSymbolsSection) {
+                localStorage.setItem(allSectionScrollKey, String(allSymbolsSection.scrollTop || 0));
+            }
+            if (watchlistSection) {
+                localStorage.setItem(watchSectionScrollKey, String(watchlistSection.scrollTop || 0));
+            }
+        };
+        window.addEventListener("beforeunload", rememberScroll);
+
+        const restoreScroll = () => {
+            const y = parseInt(localStorage.getItem(windowScrollKey) || "0", 10);
+            const allTop = parseInt(localStorage.getItem(allSectionScrollKey) || "0", 10);
+            const watchTop = parseInt(localStorage.getItem(watchSectionScrollKey) || "0", 10);
+            window.scrollTo(0, Number.isNaN(y) ? 0 : y);
+            if (allSymbolsSection && !Number.isNaN(allTop)) {
+                allSymbolsSection.scrollTop = allTop;
+            }
+            if (watchlistSection && !Number.isNaN(watchTop)) {
+                watchlistSection.scrollTop = watchTop;
+            }
+        };
+        restoreScroll();
+
+        const buildWatchButton = (stock, watchlistSet) => {
+            if (watchlistSet.has(stock.symbol)) {
+                return `<button class="watch-icon-btn saved" type="button" title="In watchlist" aria-label="In watchlist">★</button>`;
+            }
+            return `<form method="post" class="inline-form">
+                <input type="hidden" name="action" value="add_watch_symbol">
+                <input type="hidden" name="symbol_to_add" value="${stock.symbol}">
+                <button class="watch-icon-btn" type="submit" title="Save to watchlist" aria-label="Save to watchlist">☆</button>
+            </form>`;
+        };
+
+        const renderRows = (targetBody, rows, watchlist, emptyText) => {
+            if (!targetBody) return;
+            if (!rows || rows.length === 0) {
+                targetBody.innerHTML = `<tr><td colspan="10" class="empty-row">${emptyText}</td></tr>`;
+                return;
+            }
+            const watchlistSet = new Set(watchlist || []);
+            targetBody.innerHTML = rows.map((stock) => `
+                <tr>
+                    <td>${stock.time ?? "-"}</td>
+                    <td>${stock.symbol ?? "-"}</td>
+                    <td>${stock.ltp ?? "-"}</td>
+                    <td>${stock.change_pct ?? "-"}</td>
+                    <td>${stock.relative_vol ?? "-"}x</td>
+                    <td>${stock.metric_source ?? "-"}: ${stock.metric_value ?? "-"}</td>
+                    <td>${stock.trade_value_cr ?? "-"}</td>
+                    <td>${stock.condition ?? "-"}</td>
+                    <td>${stock.hits ?? "-"}</td>
+                    <td>${buildWatchButton(stock, watchlistSet)}</td>
+                </tr>
+            `).join("");
+        };
+
+        const pollDashboardData = async () => {
+            try {
+                const resp = await fetch("/api/dashboard-data", { cache: "no-store" });
+                if (!resp.ok) return;
+                const data = await resp.json();
+                renderRows(
+                    watchlistTableBody,
+                    data.watchlist_symbols || [],
+                    data.watchlist || [],
+                    "No watchlist symbols matching criteria yet."
+                );
+                renderRows(
+                    allSymbolsTableBody,
+                    data.all_symbols || [],
+                    data.watchlist || [],
+                    "No symbols matching criteria yet."
+                );
+                if (engineStatusText) {
+                    const err = data.last_error ? ` - ${data.last_error}` : "";
+                    engineStatusText.textContent = `${data.last_message || "Idle"}${err}`;
+                }
+                if (eventLog && Array.isArray(data.events)) {
+                    eventLog.innerHTML = data.events.map((e) => `<div class="event-line">${e}</div>`).join("");
+                }
+            } catch (_) {
+                // keep current UI on transient polling failure
+            }
+        };
+
+        setInterval(pollDashboardData, 1000);
     </script>
 </body>
 </html>
