@@ -661,7 +661,17 @@ class ScannerEngine:
         def on_error(message: Any) -> None:
             if not self._is_active(run_id):
                 return
-            self._set_error(f"Websocket error: {message}")
+            text = str(message or "")
+            lower = text.lower()
+            # Treat transport hiccups as transient so SDK reconnect can recover.
+            if (
+                "attempting reconnect" in lower
+                or "connection to remote host was lost" in lower
+                or "timed out" in lower
+            ):
+                self._set_message(f"Websocket transient issue: {text}", run_id)
+                return
+            self._set_error(f"Websocket error: {text}")
 
         def on_close(message: Any) -> None:
             if not self._stop_event.is_set() and self._is_active(run_id):
@@ -831,7 +841,8 @@ class ScannerEngine:
         try:
             if epoch_ts is None:
                 return "--"
-            return datetime.fromtimestamp(int(epoch_ts), tz=IST_ZONE).strftime("%Y-%m-%d %H:%M:%S")
+            dt = datetime.fromtimestamp(float(epoch_ts), tz=IST_ZONE)
+            return dt.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
         except Exception:  # noqa: BLE001
             return "--"
 
@@ -840,6 +851,10 @@ class ScannerEngine:
             self._current_minute_key = minute_key
             return
         if minute_key == self._current_minute_key:
+            return
+        # Ignore late/out-of-order ticks from an older minute.
+        # Keys are lexicographically sortable in YYYY-MM-DD HH:MM format.
+        if minute_key < self._current_minute_key:
             return
 
         self._current_minute_key = minute_key
