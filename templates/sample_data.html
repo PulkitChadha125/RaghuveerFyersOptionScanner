@@ -15,13 +15,13 @@
             <header class="topbar">
                 <div>
                     <h1>Sample Data</h1>
-                    <p class="subtle">Per-symbol minute LTQ sum vs baseline SMA</p>
-                    <p class="subtle">Current minute bucket: <strong id="minute-key-text">{{ minute_key }}</strong></p>
+                    <p class="subtle">Baseline VTT at start of current minute, current cumulative volume, delta in that minute, and delta × LTP (₹).</p>
+                    <p class="subtle">IST minute: <strong id="minute-key-text">{{ minute_key }}</strong></p>
                     <p class="subtle"><a href="{{ url_for('home') }}">Back to scanner dashboard</a></p>
                 </div>
             </header>
 
-            <section class="section-label">All Subscribed Symbols ({{ sample_rows|length }})</section>
+            <section class="section-label">Symbols ({{ sample_rows|length }})</section>
             <section style="margin: 8px 0 12px 0;">
                 <input
                     id="symbol-search-input"
@@ -35,12 +35,10 @@
                     <thead>
                         <tr>
                             <th>Symbol</th>
-                            <th>Last Traded Qty</th>
-                            <th>Last Traded Qty Sum (Minute)</th>
-                            <th>Trade Value Sum (Minute)</th>
-                            <th>Trade Value Sum (Minute, Cr)</th>
-                            <th>SMA Volume</th>
-                            <th>Timestamp</th>
+                            <th>Baseline VTT</th>
+                            <th>Current VTT</th>
+                            <th>Diff (minute)</th>
+                            <th>Value (₹)</th>
                         </tr>
                     </thead>
                     <tbody id="sample-table-body">
@@ -48,17 +46,15 @@
                             {% for row in sample_rows %}
                                 <tr data-symbol="{{ row.symbol|lower }}">
                                     <td>{{ row.symbol }}</td>
-                                    <td>{{ row.last_traded_qty if row.last_traded_qty is not none else "-" }}</td>
-                                    <td>{{ row.ltq_sum }}</td>
-                                    <td>{{ row.trade_value_sum }}</td>
-                                    <td>{{ row.trade_value_sum_cr }}</td>
-                                    <td>{{ row.sma_value }}</td>
-                                    <td>{{ row.exch_time }}</td>
+                                    <td>{{ row.vtt_baseline if row.vtt_baseline is not none else "-" }}</td>
+                                    <td>{{ row.vol_traded_today if row.vol_traded_today is not none else "-" }}</td>
+                                    <td>{{ row.vtt_diff if row.vtt_diff is not none else "-" }}</td>
+                                    <td>{{ row.value_rupees if row.value_rupees is not none else "-" }}</td>
                                 </tr>
                             {% endfor %}
                         {% else %}
                             <tr>
-                                <td colspan="7" class="empty-row">No sample rows yet. Start scanner and wait for baseline load.</td>
+                                <td colspan="5" class="empty-row">No sample rows yet. Start scanner and wait for baseline load.</td>
                             </tr>
                         {% endif %}
                     </tbody>
@@ -74,6 +70,15 @@
         const searchInput = document.getElementById("symbol-search-input");
         const tableBody = document.getElementById("sample-table-body");
         const minuteKeyText = document.getElementById("minute-key-text");
+        let latestSeq = 0;
+        let latestMinute = minuteKeyText ? minuteKeyText.textContent.trim() : "";
+
+        const fmtNum = (v) => {
+            if (v === null || v === undefined || v === "") return "-";
+            const n = Number(v);
+            if (!Number.isFinite(n)) return String(v);
+            return n.toLocaleString("en-IN", { maximumFractionDigits: 2 });
+        };
 
         const rememberScroll = () => {
             localStorage.setItem(windowScrollKey, String(window.scrollY || 0));
@@ -114,6 +119,14 @@
             applySearchFilter();
         }
 
+        const rowHtml = (row) => `
+            <td>${row.symbol ?? "-"}</td>
+            <td>${fmtNum(row.vtt_baseline)}</td>
+            <td>${fmtNum(row.vol_traded_today)}</td>
+            <td>${fmtNum(row.vtt_diff)}</td>
+            <td>${fmtNum(row.value_rupees)}</td>
+        `;
+
         const renderSampleRows = (rows) => {
             if (!tableBody) return;
             if (!rows || rows.length === 0) {
@@ -122,33 +135,56 @@
             }
             tableBody.innerHTML = rows.map((row) => `
                 <tr data-symbol="${String(row.symbol || "").toLowerCase()}">
-                    <td>${row.symbol ?? "-"}</td>
-                    <td>${row.last_traded_qty ?? "-"}</td>
-                    <td>${row.ltq_sum ?? "-"}</td>
-                    <td>${row.trade_value_sum ?? "-"}</td>
-                    <td>${row.trade_value_sum_cr ?? "-"}</td>
-                    <td>${row.sma_value ?? "-"}</td>
-                    <td>${row.exch_time ?? "-"}</td>
+                    ${rowHtml(row)}
                 </tr>
             `).join("");
             applySearchFilter();
         };
 
+        const upsertSampleRows = (rows) => {
+            if (!tableBody || !rows || rows.length === 0) return;
+            for (const row of rows) {
+                const symbol = String(row.symbol || "");
+                const key = symbol.toLowerCase();
+                let tr = tableBody.querySelector(`tr[data-symbol="${key}"]`);
+                const html = rowHtml(row);
+                if (tr) {
+                    tr.innerHTML = html;
+                } else {
+                    tr = document.createElement("tr");
+                    tr.setAttribute("data-symbol", key);
+                    tr.innerHTML = html;
+                    tableBody.appendChild(tr);
+                }
+            }
+            applySearchFilter();
+        };
+
         const pollSampleData = async () => {
             try {
-                const resp = await fetch("/api/sample-data", { cache: "no-store" });
+                const params = new URLSearchParams({
+                    since_seq: String(latestSeq),
+                    since_minute: latestMinute,
+                });
+                const resp = await fetch(`/api/sample-data?${params.toString()}`, { cache: "no-store" });
                 if (!resp.ok) return;
                 const data = await resp.json();
                 if (minuteKeyText && data.minute_key) {
                     minuteKeyText.textContent = data.minute_key;
                 }
-                renderSampleRows(data.rows || []);
+                latestMinute = data.minute_key || latestMinute;
+                latestSeq = Number.isFinite(Number(data.seq)) ? Number(data.seq) : latestSeq;
+                if (data.full) {
+                    renderSampleRows(data.rows || []);
+                } else {
+                    upsertSampleRows(data.rows || []);
+                }
             } catch (_) {
                 // keep current UI on transient polling failure
             }
         };
 
-        setInterval(pollSampleData, 1000);
+        setInterval(pollSampleData, 2000);
     </script>
 </body>
 </html>

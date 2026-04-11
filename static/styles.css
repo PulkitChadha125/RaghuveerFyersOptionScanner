@@ -92,6 +92,11 @@ thead th {
 th, td { padding: 10px 12px; border-bottom: 1px solid var(--border); font-size: 0.86rem; }
 th { color: #4b5563; font-weight: 700; text-align: left; }
 tbody tr:hover { background: #fafafa; }
+tr.scanner-row-repeat td {
+    background: #fff7ed;
+    border-bottom-color: #fed7aa;
+}
+tbody tr.scanner-row-repeat:hover td { background: #ffedd5; }
 .empty-row { text-align: center; color: var(--muted); padding: 22px; }
 
 .settings-panel {

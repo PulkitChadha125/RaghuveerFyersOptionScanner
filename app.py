@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from datetime import datetime
 from pathlib import Path
 import threading
 import webbrowser
@@ -22,13 +21,12 @@ DEFAULT_SETTINGS = {
     "rule2_volume_multiplier": 10,
     "rule2_sma_period": 1125,
     "rule2_value_cr": 8,
-    "metric_source": "last_traded_qty",
+    "metric_source": "vol_traded_today_delta",
     "watchlist": [],
     "is_started": False,
 }
 
 RUNTIME_SETTINGS = DEFAULT_SETTINGS.copy()
-PERSISTED_SHORTLIST: dict[str, dict] = {}
 ENGINE.start_daily_scheduler(sma_period=DEFAULT_SETTINGS["rule1_sma_period"])
 
 
@@ -38,14 +36,6 @@ def parse_int(field_name: str, fallback: int) -> int:
         return max(int(raw_value), 1)
     except ValueError:
         return fallback
-
-
-def row_time_sort_key(row: dict) -> datetime:
-    raw = str(row.get("time") or "").strip()
-    try:
-        return datetime.strptime(raw, "%Y-%m-%d %H:%M:%S")
-    except ValueError:
-        return datetime.min
 
 
 @app.route("/", methods=["GET", "POST"])
@@ -85,8 +75,6 @@ def home():
                 ENGINE.stop()
                 RUNTIME_SETTINGS["is_started"] = False
             else:
-                # Fresh run: clear previous in-memory UI shortlist cache.
-                PERSISTED_SHORTLIST.clear()
                 ENGINE.start(
                     sma_period=RUNTIME_SETTINGS["rule1_sma_period"],
                     scan_config={
@@ -138,16 +126,7 @@ def home():
 
     status = ENGINE.snapshot()
     RUNTIME_SETTINGS["is_started"] = status.is_running
-    if status.shortlisted_rows:
-        for row in status.shortlisted_rows:
-            symbol = str(row.get("symbol") or "").strip()
-            if symbol:
-                PERSISTED_SHORTLIST[symbol] = row
-    all_symbols = sorted(
-        PERSISTED_SHORTLIST.values(),
-        key=row_time_sort_key,
-        reverse=True,
-    )
+    all_symbols = list(status.shortlisted_rows)
     watchset = set(RUNTIME_SETTINGS["watchlist"])
     watchlist_symbols = [row for row in all_symbols if row.get("symbol") in watchset]
     return render_template(
@@ -180,12 +159,7 @@ def sample_data():
 @app.route("/api/dashboard-data", methods=["GET"])
 def dashboard_data():
     status = ENGINE.snapshot()
-    if status.shortlisted_rows:
-        for row in status.shortlisted_rows:
-            symbol = str(row.get("symbol") or "").strip()
-            if symbol:
-                PERSISTED_SHORTLIST[symbol] = row
-    all_symbols = sorted(PERSISTED_SHORTLIST.values(), key=row_time_sort_key, reverse=True)
+    all_symbols = list(status.shortlisted_rows)
     watchset = set(RUNTIME_SETTINGS["watchlist"])
     watchlist_symbols = [row for row in all_symbols if row.get("symbol") in watchset]
     return jsonify(
@@ -203,8 +177,14 @@ def dashboard_data():
 
 @app.route("/api/sample-data", methods=["GET"])
 def sample_data_api():
-    minute_key, rows = ENGINE.sample_data_snapshot()
-    return jsonify({"minute_key": minute_key, "rows": rows})
+    since_seq_raw = request.args.get("since_seq", "0").strip()
+    since_minute = request.args.get("since_minute", "").strip()
+    try:
+        since_seq = max(int(since_seq_raw), 0)
+    except ValueError:
+        since_seq = 0
+    minute_key, seq, full, rows = ENGINE.sample_data_delta(since_seq=since_seq, since_minute=since_minute)
+    return jsonify({"minute_key": minute_key, "seq": seq, "full": full, "rows": rows})
 
 
 if __name__ == "__main__":

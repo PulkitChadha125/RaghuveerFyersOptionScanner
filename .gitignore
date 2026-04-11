@@ -1,5 +1,7 @@
 .venv/
 FyersCredentials.csv
+fyerscredentials2.csv
+runtime_shortlist_state.json
 __pycache__/
 *.pyc
 *.pyo

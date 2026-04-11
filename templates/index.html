@@ -57,7 +57,7 @@
                     <tbody id="watchlist-table-body">
                         {% if watchlist_symbols %}
                             {% for stock in watchlist_symbols %}
-                                <tr>
+                                <tr class="{% if stock.symbol_repeat %}scanner-row-repeat{% endif %}">
                                     <td>{{ stock.time }}</td>
                                     <td>{{ stock.symbol }}</td>
                                     <td>{{ stock.ltp }}</td>
@@ -109,7 +109,7 @@
                     <tbody id="all-symbols-table-body">
                         {% if all_symbols %}
                             {% for stock in all_symbols %}
-                                <tr>
+                                <tr class="{% if stock.symbol_repeat %}scanner-row-repeat{% endif %}">
                                     <td>{{ stock.time }}</td>
                                     <td>{{ stock.symbol }}</td>
                                     <td>{{ stock.ltp }}</td>
@@ -156,12 +156,8 @@
                     </nav>
 
                     <form method="post" class="settings-form">
-                        <p class="rule-title">Metric source:
-                            <select name="metric_source">
-                                <option value="last_traded_qty" {% if settings.metric_source == "last_traded_qty" %}selected{% endif %}>last_traded_qty</option>
-                                <option value="vol_traded_today" {% if settings.metric_source == "vol_traded_today" %}selected{% endif %}>vol_traded_today</option>
-                            </select>
-                        </p>
+                        <input type="hidden" name="metric_source" value="vol_traded_today_delta">
+                        <p class="subtle" style="margin-top:0;">Live rules use per-minute <strong>vol_traded_today</strong> delta × LTP vs SMA volume.</p>
                         <p class="rule-title">1. Volume &gt; <input type="number" min="1" name="rule1_volume_multiplier" value="{{ settings.rule1_volume_multiplier }}"> times SMA <input type="number" min="1" name="rule1_sma_period" value="{{ settings.rule1_sma_period }}"> and Value &gt; <input type="number" min="1" name="rule1_value_cr" value="{{ settings.rule1_value_cr }}"> Cr.</p>
 
                         <p class="or-divider">OR</p>
@@ -333,7 +329,7 @@
             }
             const watchlistSet = new Set(watchlist || []);
             targetBody.innerHTML = rows.map((stock) => `
-                <tr>
+                <tr class="${stock.symbol_repeat ? "scanner-row-repeat" : ""}">
                     <td>${stock.time ?? "-"}</td>
                     <td>${stock.symbol ?? "-"}</td>
                     <td>${stock.ltp ?? "-"}</td>
@@ -377,7 +373,7 @@
             }
         };
 
-        setInterval(pollDashboardData, 1000);
+        setInterval(pollDashboardData, 2000);
     </script>
 </body>
 </html>

@@ -25,6 +25,8 @@ DB_PATH = BASE_DIR / "scanner_data.db"
 COMBINED_CSV_PATH = BASE_DIR / "combinedsymbol.csv"
 CREDS_PATH = BASE_DIR / "fyers_credentials.json"
 WS_STATE_PATH = BASE_DIR / "runtime_ws_state.json"
+# Persisted shortlist for the current IST "session" (day rolls at 08:00 IST, same as auto prep).
+SHORTLIST_STATE_PATH = BASE_DIR / "runtime_shortlist_state.json"
 FILENAME_CREDENTIALS = BASE_DIR / "FyersCredentials.csv"
 BOOTSTRAP_SYMBOL_LIMIT = 0
 RATE_LIMIT_COOLDOWN_SECS = 30
@@ -34,6 +36,26 @@ AUTO_LOGIN_AND_HISTORY_MINUTE_IST = 0
 AUTO_WS_START_HOUR_IST = 9
 AUTO_WS_START_MINUTE_IST = 15
 IST_ZONE = ZoneInfo("Asia/Kolkata")
+LOG_WS_TICK_LATENCY = False
+
+
+def shortlist_session_date_ist(now: datetime | None = None) -> str:
+    """IST calendar date for shortlist persistence; before 08:00 IST, still 'yesterday'."""
+    z = IST_ZONE
+    d = now or datetime.now(z)
+    if d.tzinfo is None:
+        d = d.replace(tzinfo=z)
+    else:
+        d = d.astimezone(z)
+    if d.hour < AUTO_LOGIN_AND_HISTORY_HOUR_IST:
+        d = d - timedelta(days=1)
+    return d.strftime("%Y-%m-%d")
+
+
+WS_LATENCY_SUMMARY_INTERVAL_SECS = 2.0
+# Evaluate rules on cached websocket state every 1s; UI polls every 2s (templates).
+EVAL_INTERVAL_SECS = 1.0
+SHORTLIST_MAX_EVENTS = 2000
 
 data_socket: data_ws.FyersDataSocket | None = None
 
@@ -82,27 +104,37 @@ class ScannerEngine:
         self._recent_events: list[str] = []
         self._ws_msg_count = 0
         self._baseline_by_symbol: dict[str, dict[str, Any]] = {}
-        self._shortlisted: dict[str, dict[str, Any]] = {}
-        self._hit_count: dict[str, int] = {}
-        self._minute_accum_metric: dict[str, float] = {}
-        self._minute_ltq_sum: dict[str, float] = {}
-        self._minute_trade_value_sum: dict[str, float] = {}
-        self._matched_this_minute: set[str] = set()
+        # Append-only shortlist: one row per qualification event (latest first in UI).
+        self._shortlist_events: list[dict[str, Any]] = []
+        self._symbol_today_hits: dict[str, int] = {}
+        # IST session key (shortlist_session_date_ist); empty until bootstrap.
+        self._shortlist_session: str = ""
+        self._shortlist_state_mtime: float = 0.0
+        self._last_qual_true: dict[str, bool] = {}
+        # Per-symbol VTT baseline for current IST minute (first tick in that minute).
+        self._vtt_baseline: dict[str, float] = {}
+        self._vtt_symbol_minute: dict[str, str] = {}
         self._current_minute_key: str | None = None
         self._startup_minute_key: str | None = None
         self._scan_ready_from_next_minute = False
         self._last_tick_by_symbol: dict[str, dict[str, Any]] = {}
+        self._ws_update_seq = 0
         self._scan_config: dict[str, Any] = {
             "rule1_volume_multiplier": 30,
             "rule1_value_cr": 4,
             "rule2_volume_multiplier": 10,
             "rule2_value_cr": 8,
-            "metric_source": "last_traded_qty",
+            "metric_source": "vol_traded_today_delta",
             "watchlist": [],
         }
         self._active_run_id = 0
         self._scheduler_thread: threading.Thread | None = None
         self._scheduler_stop_event = threading.Event()
+        self._eval_thread: threading.Thread | None = None
+        self._eval_stop_event = threading.Event()
+        self._eval_run_id = 0
+        with self._lock:
+            self._bootstrap_shortlist_state_locked()
 
     def start(
         self,
@@ -122,16 +154,18 @@ class ScannerEngine:
             self.status.last_started_at = datetime.now().isoformat(timespec="seconds")
             self._recent_events = []
             self._ws_msg_count = 0
-            self._shortlisted = {}
-            self._hit_count = {}
-            self._minute_accum_metric = {}
-            self._minute_ltq_sum = {}
-            self._minute_trade_value_sum = {}
-            self._matched_this_minute = set()
+            self._ensure_shortlist_session_locked()
+            self._reload_shortlist_if_disk_newer()
+            self._last_qual_true = {}
+            self._vtt_baseline = {}
+            self._vtt_symbol_minute = {}
             self._current_minute_key = None
             self._startup_minute_key = None
             self._scan_ready_from_next_minute = False
             self._last_tick_by_symbol = {}
+            self._ws_update_seq = 0
+            self._eval_stop_event.clear()
+            self._eval_run_id = run_id
             if scan_config:
                 self._scan_config.update(scan_config)
             self._worker = threading.Thread(
@@ -163,16 +197,97 @@ class ScannerEngine:
     def update_scan_config(self, scan_config: dict[str, Any]) -> None:
         with self._lock:
             self._scan_config.update(scan_config)
-            watchlist = set(self._scan_config.get("watchlist") or [])
-            if watchlist:
-                self._shortlisted = {
-                    k: v for k, v in self._shortlisted.items() if k in watchlist
-                }
+
+    def _persist_shortlist_state_nolock(self) -> None:
+        want = shortlist_session_date_ist()
+        self._shortlist_session = want
+        payload = {
+            "session_date": want,
+            "events": list(self._shortlist_events),
+            "symbol_hits": {str(k): int(v) for k, v in self._symbol_today_hits.items()},
+        }
+        tmp = SHORTLIST_STATE_PATH.with_suffix(".tmp")
+        tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp.replace(SHORTLIST_STATE_PATH)
+        try:
+            self._shortlist_state_mtime = SHORTLIST_STATE_PATH.stat().st_mtime
+        except OSError:
+            self._shortlist_state_mtime = 0.0
+
+    def _apply_shortlist_payload(self, payload: dict[str, Any]) -> None:
+        want = shortlist_session_date_ist()
+        file_sess = str(payload.get("session_date") or "")
+        if file_sess != want:
+            self._shortlist_events = []
+            self._symbol_today_hits = {}
+            self._shortlist_session = want
+            self._persist_shortlist_state_nolock()
+            return
+        self._shortlist_events = list(payload.get("events") or [])
+        sh = payload.get("symbol_hits") or {}
+        self._symbol_today_hits = {str(k): int(v) for k, v in sh.items()}
+        self._shortlist_session = file_sess
+
+    def _bootstrap_shortlist_state_locked(self) -> None:
+        if not SHORTLIST_STATE_PATH.exists():
+            self._shortlist_events = []
+            self._symbol_today_hits = {}
+            self._persist_shortlist_state_nolock()
+            return
+        try:
+            payload = json.loads(SHORTLIST_STATE_PATH.read_text(encoding="utf-8"))
+            self._apply_shortlist_payload(payload)
+            self._shortlist_state_mtime = SHORTLIST_STATE_PATH.stat().st_mtime
+        except Exception:  # noqa: BLE001
+            self._shortlist_events = []
+            self._symbol_today_hits = {}
+            self._persist_shortlist_state_nolock()
+
+    def _reload_shortlist_if_disk_newer(self) -> None:
+        if not SHORTLIST_STATE_PATH.exists():
+            return
+        try:
+            st = SHORTLIST_STATE_PATH.stat()
+        except OSError:
+            return
+        if st.st_mtime <= self._shortlist_state_mtime:
+            return
+        try:
+            payload = json.loads(SHORTLIST_STATE_PATH.read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001
+            return
+        self._apply_shortlist_payload(payload)
+        self._shortlist_state_mtime = st.st_mtime
+
+    def _ensure_shortlist_session_locked(self) -> None:
+        want = shortlist_session_date_ist()
+        if self._shortlist_session == want:
+            return
+        self._shortlist_events = []
+        self._symbol_today_hits = {}
+        self._shortlist_session = want
+        self._persist_shortlist_state_nolock()
+
+    def _daily_prep_clear_websocket_and_shortlist(self) -> None:
+        """08:00 IST: drop stale sockets and start a fresh shortlist session on disk."""
+        self._push_event("08:00 IST prep: closing any open FYERS websocket and resetting shortlist session.")
+        close_fyres_websocket()
+        with self._lock:
+            self._disconnect_ws()
+            self._close_stale_process()
+            want = shortlist_session_date_ist()
+            self._shortlist_events = []
+            self._symbol_today_hits = {}
+            self._shortlist_session = want
+            self._last_qual_true = {}
+            self._persist_shortlist_state_nolock()
 
     def stop(self) -> None:
         with self._lock:
             self._active_run_id += 1
+            self._eval_run_id = self._active_run_id
             self._stop_event.set()
+            self._eval_stop_event.set()
             self._disconnect_ws()
             self._close_stale_process()
             self.status.is_running = False
@@ -181,42 +296,110 @@ class ScannerEngine:
 
     def snapshot(self) -> EngineStatus:
         with self._lock:
+            self._ensure_shortlist_session_locked()
+            self._reload_shortlist_if_disk_newer()
+            rows = list(reversed(self._shortlist_events))[:300]
             return EngineStatus(
                 is_running=self.status.is_running,
                 last_message=self.status.last_message,
                 last_error=self.status.last_error,
                 last_started_at=self.status.last_started_at,
                 recent_events=list(self._recent_events),
-                shortlisted_rows=list(self._shortlisted.values())[:300],
+                shortlisted_rows=rows,
             )
 
     def sample_data_snapshot(self) -> tuple[str, list[dict[str, Any]]]:
         with self._lock:
-            minute_key = self._current_minute_key or "--"
+            minute_key = datetime.now(IST_ZONE).strftime("%Y-%m-%d %H:%M")
             rows: list[dict[str, Any]] = []
             for symbol in sorted(self._baseline_by_symbol.keys()):
-                base = self._baseline_by_symbol.get(symbol, {})
                 tick = self._last_tick_by_symbol.get(symbol, {})
-                ltq_sum = float(self._minute_ltq_sum.get(symbol, 0.0))
-                sma_value = float(base.get("sma_value") or 0.0)
+                vtt_raw = tick.get("vol_traded_today")
+                vtt_f: float | None = None
+                try:
+                    if vtt_raw is not None:
+                        vtt_f = float(vtt_raw)
+                except (TypeError, ValueError):
+                    vtt_f = None
+                baseline = self._vtt_baseline.get(symbol)
+                diff: float | None = None
+                if vtt_f is not None and baseline is not None:
+                    diff = max(vtt_f - float(baseline), 0.0)
+                ltp_raw = tick.get("ltp")
+                try:
+                    ltp_f = float(ltp_raw) if ltp_raw is not None else None
+                except (TypeError, ValueError):
+                    ltp_f = None
+                value_rupees: float | None = None
+                if diff is not None and ltp_f is not None:
+                    value_rupees = diff * ltp_f
                 rows.append(
                     {
                         "symbol": symbol,
-                        "ltq_sum": round(ltq_sum, 2),
-                        "trade_value_sum": round(
-                            float(self._minute_trade_value_sum.get(symbol, 0.0)), 2
-                        ),
-                        "trade_value_sum_cr": round(
-                            float(self._minute_trade_value_sum.get(symbol, 0.0)) / 1e7, 4
-                        ),
-                        "sma_value": round(sma_value, 2),
-                        "relative_vs_sma": round((ltq_sum / sma_value), 3) if sma_value > 0 else 0.0,
-                        "last_traded_qty": tick.get("last_traded_qty"),
-                        "ltp": tick.get("ltp"),
+                        "vtt_baseline": round(float(baseline), 2) if baseline is not None else None,
+                        "vol_traded_today": vtt_f,
+                        "vtt_diff": round(diff, 2) if diff is not None else None,
+                        "value_rupees": round(value_rupees, 2) if value_rupees is not None else None,
                         "exch_time": tick.get("exch_time", "--"),
                     }
                 )
             return minute_key, rows
+
+    def sample_data_delta(
+        self,
+        since_seq: int,
+        since_minute: str,
+    ) -> tuple[str, int, bool, list[dict[str, Any]]]:
+        with self._lock:
+            minute_key = datetime.now(IST_ZONE).strftime("%Y-%m-%d %H:%M")
+            current_seq = int(self._ws_update_seq)
+            force_full = since_minute != minute_key
+            rows: list[dict[str, Any]] = []
+            symbols = (
+                sorted(self._baseline_by_symbol.keys())
+                if force_full
+                else sorted(
+                    s
+                    for s, tick in self._last_tick_by_symbol.items()
+                    if int(tick.get("_u", 0)) > since_seq
+                )
+            )
+
+            for symbol in symbols:
+                base = self._baseline_by_symbol.get(symbol, {})
+                if not base:
+                    continue
+                tick = self._last_tick_by_symbol.get(symbol, {})
+                vtt_raw = tick.get("vol_traded_today")
+                vtt_f: float | None = None
+                try:
+                    if vtt_raw is not None:
+                        vtt_f = float(vtt_raw)
+                except (TypeError, ValueError):
+                    vtt_f = None
+                baseline = self._vtt_baseline.get(symbol)
+                diff: float | None = None
+                if vtt_f is not None and baseline is not None:
+                    diff = max(vtt_f - float(baseline), 0.0)
+                ltp_raw = tick.get("ltp")
+                try:
+                    ltp_f = float(ltp_raw) if ltp_raw is not None else None
+                except (TypeError, ValueError):
+                    ltp_f = None
+                value_rupees: float | None = None
+                if diff is not None and ltp_f is not None:
+                    value_rupees = diff * ltp_f
+                rows.append(
+                    {
+                        "symbol": symbol,
+                        "vtt_baseline": round(float(baseline), 2) if baseline is not None else None,
+                        "vol_traded_today": vtt_f,
+                        "vtt_diff": round(diff, 2) if diff is not None else None,
+                        "value_rupees": round(value_rupees, 2) if value_rupees is not None else None,
+                        "exch_time": tick.get("exch_time", "--"),
+                    }
+                )
+            return minute_key, current_seq, force_full, rows
 
     def _is_active(self, run_id: int) -> bool:
         with self._lock:
@@ -320,8 +503,13 @@ class ScannerEngine:
                 return
 
             if self.status.is_running:
-                self._push_event("Skipped auto start because scanner is already running.")
-                continue
+                self._push_event(
+                    "Scheduled 08:00 IST prep: stopping prior scanner run so today's job can start clean."
+                )
+                self.stop()
+                time.sleep(1.0)
+
+            self._daily_prep_clear_websocket_and_shortlist()
 
             ws_start_at = next_prep.replace(
                 hour=AUTO_WS_START_HOUR_IST,
@@ -646,17 +834,165 @@ class ScannerEngine:
 
         WS_STATE_PATH.unlink(missing_ok=True)
 
+    def _evaluation_loop(self, run_id: int) -> None:
+        while not self._eval_stop_event.is_set() and self._is_active(run_id):
+            self._evaluate_all_symbols(run_id)
+            self._eval_stop_event.wait(EVAL_INTERVAL_SECS)
+
+    def _evaluate_all_symbols(self, run_id: int) -> None:
+        if not self._is_active(run_id):
+            return
+        with self._lock:
+            if not self._scan_ready_from_next_minute:
+                return
+            self._ensure_shortlist_session_locked()
+            rule1_mult = float(self._scan_config.get("rule1_volume_multiplier", 30))
+            rule1_value_cr = float(self._scan_config.get("rule1_value_cr", 4))
+            rule2_mult = float(self._scan_config.get("rule2_volume_multiplier", 10))
+            rule2_value_cr = float(self._scan_config.get("rule2_value_cr", 8))
+            symbols = list(self._baseline_by_symbol.keys())
+
+        for symbol in symbols:
+            if not self._is_active(run_id) or self._eval_stop_event.is_set():
+                return
+            with self._lock:
+                base = self._baseline_by_symbol.get(symbol)
+                tick = self._last_tick_by_symbol.get(symbol)
+                baseline_vtt = self._vtt_baseline.get(symbol)
+                if not base or not tick or baseline_vtt is None:
+                    continue
+                vtt_raw = tick.get("vol_traded_today")
+                try:
+                    vtt_f = float(vtt_raw) if vtt_raw is not None else None
+                except (TypeError, ValueError):
+                    vtt_f = None
+                if vtt_f is None:
+                    continue
+                diff = max(vtt_f - float(baseline_vtt), 0.0)
+                try:
+                    ltp = float(tick.get("ltp"))
+                except (TypeError, ValueError):
+                    continue
+                sma_value = float(base.get("sma_value") or 0.0)
+                base_close = float(base.get("close") or 0.0)
+                raw_ts = tick.get("exch_feed_time") or tick.get("last_traded_time")
+                readable_ts = "--"
+                try:
+                    if raw_ts is not None:
+                        readable_ts = (
+                            pd.to_datetime(int(raw_ts), unit="s", utc=True)
+                            .tz_convert("Asia/Kolkata")
+                            .strftime("%Y-%m-%d %H:%M:%S")
+                        )
+                except Exception:  # noqa: BLE001
+                    readable_ts = str(raw_ts or "--")
+
+            value_rupees = diff * ltp
+            condition1 = diff > (rule1_mult * sma_value) and value_rupees > (rule1_value_cr * 1e7)
+            condition2 = diff > (rule2_mult * sma_value) and value_rupees > (rule2_value_cr * 1e7)
+            matched = ""
+            if condition1:
+                matched = "C1"
+            elif condition2:
+                matched = "C2"
+
+            with self._lock:
+                if not self._is_active(run_id):
+                    return
+                prev = self._last_qual_true.get(symbol, False)
+                if matched:
+                    if not prev:
+                        self._symbol_today_hits[symbol] = self._symbol_today_hits.get(symbol, 0) + 1
+                        hit_n = self._symbol_today_hits[symbol]
+                        change_pct = (
+                            ((ltp - base_close) / base_close * 100.0) if base_close > 0 else 0.0
+                        )
+                        relative_vol = (diff / sma_value) if sma_value > 0 else 0.0
+                        row = {
+                            "time": readable_ts,
+                            "symbol": symbol,
+                            "ltp": round(ltp, 2),
+                            "change_pct": f"{change_pct:+.2f}%",
+                            "metric_value": round(diff, 2),
+                            "metric_source": "vol_traded_today_delta",
+                            "relative_vol": round(relative_vol, 2),
+                            "trade_value_cr": round(value_rupees / 1e7, 3),
+                            "condition": matched,
+                            "hits": hit_n,
+                            "symbol_repeat": hit_n > 1,
+                        }
+                        self._shortlist_events.append(row)
+                        if len(self._shortlist_events) > SHORTLIST_MAX_EVENTS:
+                            self._shortlist_events = self._shortlist_events[-SHORTLIST_MAX_EVENTS:]
+                        self._persist_shortlist_state_nolock()
+                        self._push_event(
+                            f"SHORTLISTED {symbol} via {matched} "
+                            f"(vtt_diff={diff:.0f}, rel_vol={relative_vol:.2f}x, "
+                            f"trade_value={value_rupees/1e7:.2f} Cr, day_hit={hit_n})"
+                        )
+                    self._last_qual_true[symbol] = True
+                else:
+                    self._last_qual_true[symbol] = False
+
     def _start_websocket(self, access_token: str, symbols: list[str], run_id: int) -> None:
         global data_socket
         self._disconnect_ws()
         self._close_stale_process()
         WS_STATE_PATH.write_text(json.dumps({"pid": os.getpid()}), encoding="utf-8")
+        latency_stats = {
+            "window_start": time.perf_counter(),
+            "ticks": 0,
+            "recv_sum_ms": 0.0,
+            "recv_count": 0,
+            "proc_sum_ms": 0.0,
+        }
 
         def on_message(message: dict[str, Any]) -> None:
             if not self._is_active(run_id):
                 return
+            t0 = time.perf_counter()
             self._ws_msg_count += 1
+            raw_ts = message.get("exch_feed_time") or message.get("last_traded_time")
             self._apply_scanner_rules(message)
+            t1 = time.perf_counter()
+
+            if LOG_WS_TICK_LATENCY:
+                recv_latency_ms: str | float = "--"
+                try:
+                    if raw_ts is not None:
+                        recv_latency_ms = round((time.time() - float(raw_ts)) * 1000.0, 2)
+                except Exception:  # noqa: BLE001
+                    recv_latency_ms = "--"
+
+                processing_ms = round((t1 - t0) * 1000.0, 3)
+                latency_stats["ticks"] += 1
+                latency_stats["proc_sum_ms"] += float(processing_ms)
+                if isinstance(recv_latency_ms, (int, float)):
+                    latency_stats["recv_sum_ms"] += float(recv_latency_ms)
+                    latency_stats["recv_count"] += 1
+
+                now = time.perf_counter()
+                elapsed = now - float(latency_stats["window_start"])
+                if elapsed >= WS_LATENCY_SUMMARY_INTERVAL_SECS:
+                    recv_count = int(latency_stats["recv_count"])
+                    ticks = int(latency_stats["ticks"])
+                    proc_avg_ms = (
+                        latency_stats["proc_sum_ms"] / ticks if ticks > 0 else 0.0
+                    )
+                    recv_avg_ms = (
+                        latency_stats["recv_sum_ms"] / recv_count if recv_count > 0 else 0.0
+                    )
+                    print(
+                        "[WS LATENCY SUMMARY] "
+                        f"ticks={ticks} "
+                        f"recv_avg_ms={recv_avg_ms:.2f} "
+                        f"processing_avg_ms={proc_avg_ms:.4f}"
+                    )
+                    latency_stats["window_start"] = now
+                    latency_stats["ticks"] = 0
+                    latency_stats["recv_sum_ms"] = 0.0
+                    latency_stats["recv_count"] = 0
+                    latency_stats["proc_sum_ms"] = 0.0
 
         def on_error(message: Any) -> None:
             if not self._is_active(run_id):
@@ -680,7 +1016,12 @@ class ScannerEngine:
         def on_open() -> None:
             if not self._is_active(run_id):
                 return
-            self._startup_minute_key = datetime.now().strftime("%Y-%m-%d %H:%M")
+            self._eval_stop_event.set()
+            if self._eval_thread is not None and self._eval_thread.is_alive():
+                self._eval_thread.join(timeout=2.5)
+            self._eval_stop_event.clear()
+            self._eval_run_id = run_id
+            self._startup_minute_key = datetime.now(IST_ZONE).strftime("%Y-%m-%d %H:%M")
             self._scan_ready_from_next_minute = False
             self._set_message(
                 f"Websocket live. Waiting for next minute after {self._startup_minute_key}...",
@@ -691,6 +1032,13 @@ class ScannerEngine:
                 batch = symbols[start : start + batch_size]
                 self._ws_client.subscribe(symbols=batch, data_type="SymbolUpdate")
             self._ws_client.keep_running()
+            self._eval_thread = threading.Thread(
+                target=self._evaluation_loop,
+                args=(run_id,),
+                name="scanner-eval",
+                daemon=True,
+            )
+            self._eval_thread.start()
 
         self._ws_client = data_ws.FyersDataSocket(
             access_token=access_token,
@@ -707,6 +1055,7 @@ class ScannerEngine:
         self._ws_client.connect()
 
     def _apply_scanner_rules(self, message: dict[str, Any]) -> None:
+        """Ingest websocket tick: update VTT baseline per IST minute and cache last tick."""
         symbol = str(message.get("symbol") or "").strip()
         if not symbol:
             return
@@ -721,6 +1070,13 @@ class ScannerEngine:
             return
         self._roll_minute_if_needed(minute_key)
 
+        vtt_f: float | None = None
+        try:
+            if message.get("vol_traded_today") is not None:
+                vtt_f = float(message.get("vol_traded_today"))
+        except (TypeError, ValueError):
+            vtt_f = None
+
         raw_ltq = message.get("last_traded_qty")
         if raw_ltq is None:
             raw_ltq = message.get("ltq")
@@ -731,103 +1087,31 @@ class ScannerEngine:
         except (TypeError, ValueError):
             parsed_ltq = None
 
+        prev_minute = self._vtt_symbol_minute.get(symbol)
+        if prev_minute != minute_key:
+            self._vtt_symbol_minute[symbol] = minute_key
+            if vtt_f is not None:
+                self._vtt_baseline[symbol] = vtt_f
+        elif vtt_f is not None and symbol not in self._vtt_baseline:
+            self._vtt_baseline[symbol] = vtt_f
+
+        if vtt_f is not None and symbol in self._vtt_baseline and vtt_f < self._vtt_baseline[symbol]:
+            self._vtt_baseline[symbol] = vtt_f
+
         self._last_tick_by_symbol[symbol] = {
             "last_traded_qty": parsed_ltq,
+            "ltq": message.get("ltq"),
+            "ltp": message.get("ltp"),
+            "vol_traded_today": message.get("vol_traded_today"),
+            "bid_price": message.get("bid_price"),
+            "ask_price": message.get("ask_price"),
+            "high_price": message.get("high_price"),
+            "exch_feed_time": message.get("exch_feed_time"),
+            "last_traded_time": message.get("last_traded_time"),
             "exch_time": self._to_ist_second_str(raw_ts),
+            "_u": self._ws_update_seq + 1,
         }
-        ltp_value: float | None = None
-        try:
-            if message.get("ltp") is not None:
-                ltp_value = float(message.get("ltp"))
-        except (TypeError, ValueError):
-            ltp_value = None
-
-        if parsed_ltq is not None:
-            self._minute_ltq_sum[symbol] = self._minute_ltq_sum.get(symbol, 0.0) + parsed_ltq
-            if ltp_value is not None:
-                self._minute_trade_value_sum[symbol] = (
-                    self._minute_trade_value_sum.get(symbol, 0.0) + (ltp_value * parsed_ltq)
-                )
-
-        if not self._scan_ready_from_next_minute:
-            return
-
-        try:
-            ltp = float(message.get("ltp"))
-            sma_value = float(base.get("sma_value") or 0.0)
-            base_close = float(base.get("close") or 0.0)
-        except (TypeError, ValueError):
-            return
-
-        rule1_mult = float(self._scan_config.get("rule1_volume_multiplier", 30))
-        rule1_value_cr = float(self._scan_config.get("rule1_value_cr", 4))
-        rule2_mult = float(self._scan_config.get("rule2_volume_multiplier", 10))
-        rule2_value_cr = float(self._scan_config.get("rule2_value_cr", 8))
-
-        # Always use minute LTQ sum for real-time condition checks.
-        effective_qty = self._minute_ltq_sum.get(symbol, 0.0)
-        self._minute_accum_metric[symbol] = effective_qty
-        if effective_qty <= 0:
-            return
-
-        trade_value = self._minute_trade_value_sum.get(symbol, 0.0)
-        relative_vol = (effective_qty / sma_value) if sma_value > 0 else 0.0
-        change_pct = ((ltp - base_close) / base_close * 100.0) if base_close > 0 else 0.0
-        condition1 = (
-            effective_qty > (rule1_mult * sma_value)
-            and trade_value > (rule1_value_cr * 1e7)
-        )
-        condition2 = (
-            effective_qty > (rule2_mult * sma_value)
-            and trade_value > (rule2_value_cr * 1e7)
-        )
-
-        matched_condition = ""
-        if condition1:
-            matched_condition = "C1"
-        elif condition2:
-            matched_condition = "C2"
-
-        # If symbol has already qualified in this minute, don't reevaluate until next minute.
-        if symbol in self._matched_this_minute:
-            return
-
-        if not matched_condition:
-            return
-
-        self._matched_this_minute.add(symbol)
-        self._hit_count[symbol] = self._hit_count.get(symbol, 0) + 1
-
-        readable_ts = "--"
-        try:
-            if raw_ts is not None:
-                readable_ts = (
-                    pd.to_datetime(int(raw_ts), unit="s", utc=True)
-                    .tz_convert("Asia/Kolkata")
-                    .strftime("%Y-%m-%d %H:%M:%S")
-                )
-        except Exception:  # noqa: BLE001
-            readable_ts = str(raw_ts or "--")
-
-        row = {
-            "time": readable_ts,
-            "symbol": symbol,
-            "ltp": round(ltp, 2),
-            "change_pct": f"{change_pct:+.2f}%",
-            "metric_value": round(effective_qty, 2),
-            "metric_source": "last_traded_qty",
-            "relative_vol": round(relative_vol, 2),
-            "trade_value_cr": round(trade_value / 1e7, 3),
-            "condition": matched_condition,
-            "hits": self._hit_count.get(symbol, 1),
-        }
-        self._shortlisted[symbol] = row
-
-        self._push_event(
-            f"SHORTLISTED {symbol} via {matched_condition} "
-            f"(last_traded_qty={effective_qty:.2f}, rel_vol={relative_vol:.2f}x, "
-            f"trade_value={trade_value/1e7:.2f} Cr, hits={self._hit_count.get(symbol, 1)})"
-        )
+        self._ws_update_seq += 1
 
     def _to_ist_minute_key(self, epoch_ts: Any) -> str | None:
         try:
@@ -852,21 +1136,15 @@ class ScannerEngine:
             return
         if minute_key == self._current_minute_key:
             return
-        # Ignore late/out-of-order ticks from an older minute.
-        # Keys are lexicographically sortable in YYYY-MM-DD HH:MM format.
         if minute_key < self._current_minute_key:
             return
 
         self._current_minute_key = minute_key
-        self._minute_accum_metric = {}
-        self._minute_ltq_sum = {}
-        self._minute_trade_value_sum = {}
-        self._matched_this_minute = set()
         if not self._scan_ready_from_next_minute:
             self._scan_ready_from_next_minute = True
             self._push_event(f"Minute boundary reached at {minute_key}. Live scanner active.")
         else:
-            self._push_event(f"New minute {minute_key}. Reset minute accumulators.")
+            self._push_event(f"New minute {minute_key}.")
 
 
 ENGINE = ScannerEngine()
