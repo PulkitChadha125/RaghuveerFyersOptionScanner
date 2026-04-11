@@ -1,6 +1,6 @@
 # Raghuveer Fyers Scanner
 
-A Python tool that pulls NSE equity symbols, logs into [Fyers](https://fyers.in/) with TOTP-based automation, builds a per-symbol volume baseline from historical 1-minute candles, then watches live **SymbolUpdate** websocket ticks to flag stocks that spike on volume and traded value against that baseline.
+A Python tool that pulls NSE equity symbols, logs into [Fyers](https://fyers.in/) with TOTP-based automation, builds a per-symbol **volume SMA** baseline from historical **1-minute** candles, then watches live **SymbolUpdate** websocket data. A background evaluator runs every second on cached ticks to flag names where **intraday volume traded today (VTT)** in the current IST **minute** (relative to that minute’s baseline) and **rupee value** (delta × LTP) exceed configurable rules. A Flask dashboard shows hits (newest first), persists them for the trading session, and exposes a compact “sample data” view of VTT math per symbol.
 
 ---
 
@@ -65,7 +65,7 @@ Then open the URL Flask prints (default **http://127.0.0.1:5000**). Use the UI t
 
 ---
 
-## What the project does (logic)
+## What the project does (current approach)
 
 ### Symbol universe (`main.py`)
 
@@ -76,40 +76,58 @@ Then open the URL Flask prints (default **http://127.0.0.1:5000**). Use the UI t
 ### Scanner engine (`scanner_engine.py`)
 
 1. **Bootstrap**  
-   On start, refreshes the symbol CSV, then loads symbols from `NSE_EQ_symbols.csv`. For faster startup it currently uses only the **last 50** symbols (`BOOTSTRAP_SYMBOL_LIMIT`).
+   On start, refreshes the symbol CSV, then loads symbols from `NSE_EQ_symbols.csv`.  
+   `BOOTSTRAP_SYMBOL_LIMIT` controls how many symbols to use from the end of the list; **`0` means all symbols** (non‑positive = full universe).
 
 2. **Login**  
    Uses `FyersCredentials.csv` and `automated_login()` to get `access_token` and an authenticated Fyers client.
 
 3. **Historical baseline**  
-   For each symbol, fetches **1-minute** candles over a date range derived from the configured SMA period (and related constants), computes a **rolling mean of volume** over that period, and takes the last useful row (yesterday if available, else latest).  
-   Results are written to **`combinedsymbol.csv`** and upserted into SQLite **`scanner_data.db`** (`symbol_snapshot` table).
+   For each symbol, fetches **1-minute** candles over a date range derived from the configured SMA period, computes a **rolling mean of volume** (SMA), and builds a baseline row (close, SMA volume, etc.).  
+   Results are written to **`combinedsymbol.csv`** and upserted into SQLite **`scanner_data.db`** (`symbol_snapshot` table). This path is unchanged for “history first, then live.”
 
-4. **Live websocket**  
-   Subscribes to **`SymbolUpdate`** in batches. Ticks in the **first** IST minute seen on the wire are used only to establish a minute bucket; on the **first clock rollover** to a new minute, in-memory per-minute accumulators are cleared and **`_scan_ready_from_next_minute`** turns on. From that boundary onward, each minute is a fresh bucket (matches your “wait for the next minute, then accumulate” behaviour). State is kept **in process** (Python dicts), not Redis—enough for a single app instance.
+4. **Live websocket (ingest only)**  
+   Subscribes to **`SymbolUpdate`** in batches. Ticks update **`_last_tick_by_symbol`** and drive **IST minute** bookkeeping:
+   - On the **first tick in a new IST minute** for a symbol, **`vol_traded_today` (VTT)** is stored as that minute’s **baseline** for that symbol.
+   - If VTT moves backward (exchange correction), the baseline is adjusted down to stay consistent.
+   - **Rules are not evaluated on every tick** (avoids lag under heavy tick rates).
 
-5. **Matching rules (volume / value only)**  
-   For each tick after scan-ready, the engine reads a configurable **metric** (default `last_traded_qty`; can fall back to `ltq`). For `last_traded_qty`, each print’s quantity is **added** into `_minute_accum_metric[symbol]` for the current IST minute; **`effective_qty`** is that running sum until the minute changes.
+5. **Minute boundary / “scan ready”**  
+   When the exchange clock rolls to a **new IST minute** (from tick timestamps), the engine sets **`_scan_ready_from_next_minute`** after the first boundary (same “wait for clean minute” idea as before). Until then, live rules do not arm.
 
-   On each **new** minute, `_minute_accum_metric` and `_matched_this_minute` are **reset**. If a symbol already matched in the current minute, it is not re-evaluated until the next minute (so you don’t spam the list with the same bar).
+6. **Rule evaluation (1 Hz)**  
+   A daemon thread runs every **`EVAL_INTERVAL_SECS` (1 s)** and reads only **cached** websocket state. For each symbol with baseline + tick + SMA:
+   - **`diff`** = `max(current_VTT − minute_baseline_VTT, 0)`  
+   - **`value_rupees`** = `diff × LTP`  
+   Two branches (**C1** / **C2**) are OR’d; each requires volume vs SMA and rupee notionals in **crore** scale (`× 1e7` in code), e.g.  
+   `diff > ruleN_volume_multiplier × SMA_volume` **and** `value_rupees > ruleN_value_cr × 1e7`.  
+   **Leading edge:** a new shortlist row is appended only when the condition becomes true after having been false (so you do not get a row every second while it stays true). When it fires again later the same IST **session day**, you get **another row** (multiple hits per symbol per day).
 
-   Two conditions (C1 / C2) combine:
+7. **Shortlist UI semantics**  
+   - Rows are **newest first** (last qualifying event at the top).  
+   - **`symbol_repeat`**: styling / “hit again today” when the symbol has more than one qualifying edge that session.  
+   - In-memory list is capped (**`SHORTLIST_MAX_EVENTS`**); the dashboard snapshot returns the latest slice (e.g. top 300).
 
-   - **Volume vs baseline:** effective quantity &gt; `ruleN_volume_multiplier × SMA(volume)`  
-   - **Traded value:** `effective_qty × LTP` &gt; `ruleN_value_cr × 1e7` (value expressed in “crore” scale in code)
+8. **Persisted session state (server / multi-device)**  
+   - **`runtime_shortlist_state.json`** stores the shortlist for the current **IST session day**.  
+   - Session date uses **`shortlist_session_date_ist()`**: before **08:00 IST** it still counts as the **previous** calendar day’s session; from **08:00** onward it is the **new** session.  
+   - The file is rewritten whenever a new shortlist event is stored. **`snapshot()`** reloads from disk if the file is newer (so a phone and a laptop against the same server see the same list after refresh).  
+   - **`start()`** does **not** wipe the shortlist for the same session (stop/start same day keeps history).  
+   - At **08:00 IST** the daily scheduler runs prep: if a run was still active it is **stopped**, any **websocket** is closed, stale **`runtime_ws_state.json`** cleanup runs, and the **shortlist file + in-memory shortlist** are cleared for the new session—then **`start()`** runs (history immediately, websocket at **09:15 IST** when using the auto schedule).
 
-   Defaults in the Flask app: Rule1 uses ×30 volume and 4 Cr; Rule2 uses ×10 volume and 8 Cr. C1 is checked before C2. When a row matches, it is stored in the shortlist shown in the UI (and updated on later hits via hit count where applicable).
+9. **Daily auto schedule (constants)**  
+   - **`AUTO_LOGIN_AND_HISTORY_HOUR_IST` / `MINUTE_IST`** — default **08:00** prep (login + history + wait).  
+   - **`AUTO_WS_START_HOUR_IST` / `MINUTE_IST`** — default **09:15** websocket connect.  
+   - Websocket connect path already disconnects any prior client before subscribing.
 
-6. **Output**  
-   Shortlisted symbols (with LTP, change %, relative volume, trade value in Cr, condition, hit count) feed the UI. Recent pipeline/websocket lines are kept in memory for the dashboard.
-
-7. **Stop / cleanup**  
-   Stopping closes the websocket; on Windows, a stale subprocess may be cleared via `taskkill` using `runtime_ws_state.json` if present.
+10. **Stop / cleanup**  
+    Stopping bumps run ids, stops the eval thread, and closes the websocket. On Windows, a stale subprocess may be cleared via `taskkill` using `runtime_ws_state.json` if present.
 
 ### Web UI (`app.py` + `templates/`)
 
-- Form posts adjust rule multipliers, SMA periods (passed into the engine at start), metric source, watchlist, and start/stop.
-- Watchlist filters which shortlisted rows are highlighted; engine can trim stored shortlist to watchlist symbols when the watchlist is non-empty.
+- Form posts adjust rule multipliers, SMA periods (passed into the engine at start), and watchlist; live metric is **VTT delta per minute** (described in the UI; not a user-selectable LTQ mode anymore).
+- **Dashboard** polls **`/api/dashboard-data` every 2 seconds**; tables show all shortlist events for the session (watchlist is a **view filter** in the UI, not a server-side trim of stored hits).
+- **Sample data** page polls **`/api/sample-data` every 2 seconds** and shows, per symbol: **baseline VTT**, **current VTT**, **minute diff**, **value (₹)**.
 
 ### Fyers integration (`FyresIntegration.py`)
 
@@ -118,15 +136,28 @@ Then open the URL Flask prints (default **http://127.0.0.1:5000**). Use the UI t
 
 ---
 
+## Cadence summary
+
+| Layer | Interval |
+|--------|-----------|
+| Websocket | As fast as the exchange sends ticks (ingest only) |
+| Rule evaluation | **1 s** on cached state (`EVAL_INTERVAL_SECS`) |
+| Dashboard + sample data HTTP refresh | **2 s** (`setInterval` in templates) |
+
+---
+
 ## Generated / local files
 
 You may see these after running (some are gitignored or environment-specific):
 
-- `NSE_EQ_symbols.csv` — equity symbol list  
-- `combinedsymbol.csv` — last bootstrap snapshot per symbol  
-- `scanner_data.db` — SQLite snapshots  
-- `runtime_ws_state.json` — optional PID hint for cleanup  
-- Fyers log files in the project directory (from the API SDK)
+| File | Purpose |
+|------|--------|
+| `NSE_EQ_symbols.csv` | Equity symbol list |
+| `combinedsymbol.csv` | Last bootstrap snapshot per symbol |
+| `scanner_data.db` | SQLite snapshots |
+| `runtime_ws_state.json` | Optional PID hint for websocket cleanup |
+| `runtime_shortlist_state.json` | Persisted shortlist + per-symbol hit counts for the current IST session (gitignored) |
+| Fyers log files | From the API SDK in the project directory |
 
 ---
 
