@@ -14,6 +14,7 @@ import warnings
 import pandas as pd
 access_token=None
 fyers=None
+data_socket = None
 shared_data = {}
 shared_data_2 = {}
 # Lock to ensure thread-safe access to the shared data
@@ -334,7 +335,9 @@ def fetchOHLC_get_selected_price(symbol, date):
 
 def fyres_websocket(symbollist):
     from fyers_apiv3.FyersWebsocket import data_ws
-    global access_token
+    global access_token, data_socket
+
+    close_fyres_websocket()
 
     def onmessage(message):
         """
@@ -417,7 +420,20 @@ def fyres_websocket(symbollist):
     )
 
     # Establish a connection to the Fyers WebSocket
+    data_socket = fyers
     fyers.connect()
+
+
+def close_fyres_websocket():
+    """Close any existing FYERS websocket instance before re-subscribing."""
+    global data_socket
+    if data_socket is None:
+        return
+    try:
+        data_socket.close_connection()
+    except Exception:
+        pass
+    data_socket = None
 
 def fyres_quote(symbol):
     data = {
@@ -433,7 +449,9 @@ def fyres_quote(symbol):
 
 def fyres_websocket_option(symbollist):
     from fyers_apiv3.FyersWebsocket import data_ws
-    global access_token
+    global access_token, data_socket
+
+    close_fyres_websocket()
 
     def onmessage(message):
         """
@@ -504,6 +522,7 @@ def fyres_websocket_option(symbollist):
     )
 
     # Establish a connection to the Fyers WebSocket
+    data_socket = fyers
     fyers.connect()
 
 

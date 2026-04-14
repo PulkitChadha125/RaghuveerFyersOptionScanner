@@ -3,312 +3,285 @@
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Alice Equity Scanner</title>
+    <title>Raghuveer Equity Scanner</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
 </head>
 <body>
-    <div class="app-shell" id="app-shell">
-        <main class="stock-panel">
-            <header class="topbar">
-                <div>
-                    <h1>Scanner Dashboard</h1>
-                    <p class="subtle">Shows only symbols matching your live criteria</p>
-                    <p class="subtle"><a href="{{ url_for('sample_data') }}">Open sample data page</a></p>
-                </div>
-                <button class="ghost-btn icon-btn" type="button" id="toggle-sidebar-btn" title="Toggle sidebar" aria-label="Toggle sidebar">☰</button>
-                <button class="ghost-btn icon-btn" type="button" id="expand-sidebar-btn" style="display:none;" title="Show settings" aria-label="Show settings">⚙</button>
-            </header>
-            <section class="watchlist-inline">
-                <strong>Watchlist:</strong>
-                {% if watchlist %}
-                    {% for symbol in watchlist %}
-                        <span class="watch-pill">{{ symbol }}</span>
-                    {% endfor %}
-                {% else %}
-                    <span class="subtle">No watchlist symbols yet.</span>
+    <div class="scanner-app" id="scanner-app">
+        <header class="scanner-header">
+            <div class="scanner-header-left">
+                <h1 class="scanner-title">Raghuveer Equity Scanner</h1>
+            </div>
+            <div class="live-pill {% if settings.is_started %}on{% endif %}" id="live-pill" aria-live="polite">
+                <span class="dot" aria-hidden="true"></span>
+                <span id="live-pill-text">{% if settings.is_started %}Live{% else %}Idle{% endif %}</span>
+            </div>
+        </header>
+
+        <div class="scanner-toolbar">
+            <form method="post" style="margin:0;">
+                <button class="toolbar-btn toolbar-btn-start" type="submit" name="action" value="start_scanner" {% if settings.is_started %}disabled{% endif %}>Start</button>
+            </form>
+            <form method="post" style="margin:0;">
+                <button class="toolbar-btn toolbar-btn-stop" type="submit" name="action" value="stop_scanner" {% if not settings.is_started %}disabled{% endif %}>Stop</button>
+            </form>
+            <button class="toolbar-btn toolbar-btn-settings" type="button" id="open-settings">Settings</button>
+            <div class="nav-pill">
+                <a href="{{ url_for('home') }}" class="active">Scanner</a>
+                <a href="{{ url_for('sample_data') }}">Sample data</a>
+            </div>
+        </div>
+
+        <p class="info-banner">
+            Open this URL from another device on the same network: <strong id="lan-hint-host">—</strong>
+            (use your machine’s LAN IP and port if not localhost).
+        </p>
+
+        <section class="status-cards">
+            <div class="status-card">
+                <div class="status-card-label">Universe symbols</div>
+                <div class="status-card-value" id="stat-universe">{{ universe_total }}</div>
+                <div class="status-card-sub">From NSE_EQ symbol CSV</div>
+            </div>
+            <div class="status-card">
+                <div class="status-card-label">Baselines loaded</div>
+                <div class="status-card-value" id="stat-baseline">{{ baseline_loaded_count }}</div>
+                <div class="status-card-sub">After history bootstrap</div>
+            </div>
+            <div class="status-card">
+                <div class="status-card-label">Last action</div>
+                <div class="status-card-value" style="font-size:1rem;font-weight:600;" id="stat-message">{{ engine_status.last_message or "Idle" }}</div>
+                {% if engine_status.last_error %}
+                <div class="status-card-sub" style="color:var(--stop);">{{ engine_status.last_error }}</div>
                 {% endif %}
-            </section>
+            </div>
+        </section>
 
-            <section class="view-toggle-row">
-                <button class="ghost-btn active-view-btn icon-btn" type="button" id="watchlist-view-btn" title="Watchlist view" aria-label="Watchlist view">★</button>
-                <button class="ghost-btn icon-btn" type="button" id="all-symbols-view-btn" title="All symbols view" aria-label="All symbols view">◫</button>
-            </section>
+        <div class="scanner-toolbar" style="margin-bottom:12px;">
+            <span style="font-size:0.78rem;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:0.05em;margin-right:8px;">View</span>
+            <button type="button" class="toolbar-btn toolbar-btn-settings" id="filter-all" style="padding:8px 14px;background:var(--brown-700);">All hits</button>
+            <button type="button" class="toolbar-btn toolbar-btn-settings" id="filter-watch" style="padding:8px 14px;opacity:0.85;">Watchlist only</button>
+        </div>
 
-            <section class="section-label view-section" id="watchlist-section-label">Watchlist Symbols</section>
-            <section class="table-wrap view-section" id="watchlist-section">
-                <table>
-                    <thead>
-                        <tr>
-                            <th>Time</th>
-                            <th>Symbol</th>
-                            <th>LTP</th>
-                            <th>Change %</th>
-                            <th>RelativeVol</th>
-                            <th>Metric</th>
-                            <th>Trade Value (Cr)</th>
-                            <th>Rule</th>
-                            <th>Hits</th>
-                            <th>Watchlist</th>
-                        </tr>
-                    </thead>
-                    <tbody id="watchlist-table-body">
-                        {% if watchlist_symbols %}
-                            {% for stock in watchlist_symbols %}
-                                <tr class="{% if stock.symbol_repeat %}scanner-row-repeat{% endif %}">
-                                    <td>{{ stock.time }}</td>
-                                    <td>{{ stock.symbol }}</td>
-                                    <td>{{ stock.ltp }}</td>
-                                    <td>{{ stock.change_pct }}</td>
-                                    <td>{{ stock.relative_vol }}x</td>
-                                    <td>{{ stock.metric_source }}: {{ stock.metric_value }}</td>
-                                    <td>{{ stock.trade_value_cr }}</td>
-                                    <td>{{ stock.condition }}</td>
-                                    <td>{{ stock.hits }}</td>
-                                    <td>
-                                        {% if stock.symbol in watchlist %}
-                                            <button class="watch-icon-btn saved" type="button" title="In watchlist" aria-label="In watchlist">★</button>
-                                        {% else %}
-                                            <form method="post" class="inline-form">
-                                                <input type="hidden" name="action" value="add_watch_symbol">
-                                                <input type="hidden" name="symbol_to_add" value="{{ stock.symbol }}">
-                                                <button class="watch-icon-btn" type="submit" title="Save to watchlist" aria-label="Save to watchlist">☆</button>
-                                            </form>
-                                        {% endif %}
-                                    </td>
-                                </tr>
-                            {% endfor %}
-                        {% else %}
-                            <tr>
-                                <td colspan="10" class="empty-row">No watchlist symbols matching criteria yet.</td>
-                            </tr>
-                        {% endif %}
-                    </tbody>
-                </table>
-            </section>
-
-            <section class="section-label view-section" id="all-symbols-section-label">All Symbols</section>
-            <section class="table-wrap view-section" id="all-symbols-section">
-                <table>
-                    <thead>
-                        <tr>
-                            <th>Time</th>
-                            <th>Symbol</th>
-                            <th>LTP</th>
-                            <th>Change %</th>
-                            <th>RelativeVol</th>
-                            <th>Metric</th>
-                            <th>Trade Value (Cr)</th>
-                            <th>Rule</th>
-                            <th>Hits</th>
-                            <th>Watchlist</th>
-                        </tr>
-                    </thead>
-                    <tbody id="all-symbols-table-body">
-                        {% if all_symbols %}
-                            {% for stock in all_symbols %}
-                                <tr class="{% if stock.symbol_repeat %}scanner-row-repeat{% endif %}">
-                                    <td>{{ stock.time }}</td>
-                                    <td>{{ stock.symbol }}</td>
-                                    <td>{{ stock.ltp }}</td>
-                                    <td>{{ stock.change_pct }}</td>
-                                    <td>{{ stock.relative_vol }}x</td>
-                                    <td>{{ stock.metric_source }}: {{ stock.metric_value }}</td>
-                                    <td>{{ stock.trade_value_cr }}</td>
-                                    <td>{{ stock.condition }}</td>
-                                    <td>{{ stock.hits }}</td>
-                                    <td>
-                                        {% if stock.symbol in watchlist %}
-                                            <button class="watch-icon-btn saved" type="button" title="In watchlist" aria-label="In watchlist">★</button>
-                                        {% else %}
-                                            <form method="post" class="inline-form">
-                                                <input type="hidden" name="action" value="add_watch_symbol">
-                                                <input type="hidden" name="symbol_to_add" value="{{ stock.symbol }}">
-                                                <button class="watch-icon-btn" type="submit" title="Save to watchlist" aria-label="Save to watchlist">☆</button>
-                                            </form>
-                                        {% endif %}
-                                    </td>
-                                </tr>
-                            {% endfor %}
-                        {% else %}
-                            <tr>
-                                <td colspan="10" class="empty-row">No symbols matching criteria yet.</td>
-                            </tr>
-                        {% endif %}
-                    </tbody>
-                </table>
-            </section>
-        </main>
-
-        <aside class="settings-panel">
-            <details class="settings-collapsible" open id="settings-box">
-                <summary class="panel-header" id="collapse-settings-btn">
-                    <h2>Settings</h2>
-                    <span class="collapse-icon" aria-hidden="true"></span>
-                </summary>
-
-                <div class="settings-content">
-                    <nav class="side-menu">
-                        <button class="menu-item active" type="button">Sync History Data</button>
-                        <button class="menu-item" type="button">Tick Query Criteria</button>
-                    </nav>
-
-                    <form method="post" class="settings-form">
-                        <input type="hidden" name="metric_source" value="vol_traded_today_delta">
-                        <p class="subtle" style="margin-top:0;">Live rules use per-minute <strong>vol_traded_today</strong> delta × LTP vs SMA volume.</p>
-                        <p class="rule-title">1. Volume &gt; <input type="number" min="1" name="rule1_volume_multiplier" value="{{ settings.rule1_volume_multiplier }}"> times SMA <input type="number" min="1" name="rule1_sma_period" value="{{ settings.rule1_sma_period }}"> and Value &gt; <input type="number" min="1" name="rule1_value_cr" value="{{ settings.rule1_value_cr }}"> Cr.</p>
-
-                        <p class="or-divider">OR</p>
-
-                        <p class="rule-title">2. Volume &gt; <input type="number" min="1" name="rule2_volume_multiplier" value="{{ settings.rule2_volume_multiplier }}"> times SMA <input type="number" min="1" name="rule2_sma_period" value="{{ settings.rule2_sma_period }}"> and Value &gt; <input type="number" min="1" name="rule2_value_cr" value="{{ settings.rule2_value_cr }}"> Cr.</p>
-
-                        <div class="action-row">
-                            <button class="secondary-btn" type="submit" name="reset_defaults" value="1">Use Default</button>
-                            <button class="primary-btn" type="submit" name="action" value="save_settings">Save</button>
-                        </div>
-                    </form>
-
-                    <section class="watchlist-card">
-                        <h3>Watchlist</h3>
-                        {% if watchlist %}
-                            {% for symbol in watchlist %}
-                                <form method="post" class="watch-row">
-                                    <input type="hidden" name="action" value="remove_watch_symbol">
-                                    <input type="hidden" name="symbol_to_remove" value="{{ symbol }}">
-                                    <span>{{ symbol }}</span>
-                                    <button type="submit" class="remove-btn">Remove</button>
-                                </form>
-                            {% endfor %}
-                        {% else %}
-                            <p class="subtle">No symbols in watchlist. Save from table.</p>
-                        {% endif %}
-                    </section>
-
-                    <div class="footer-actions">
-                        <p class="engine-config">
-                            Bootstrap symbols: {{ bootstrap_symbol_limit }}<br>
-                            Rate-limit retry: {{ rate_limit_cooldown_secs }}s
-                        </p>
-                        <p class="engine-status" id="engine-status-text">
-                            {{ engine_status.last_message }}
-                            {% if engine_status.last_error %}
-                                - {{ engine_status.last_error }}
-                            {% endif %}
-                        </p>
-                        <div class="event-log" id="event-log">
-                            {% for event in engine_events %}
-                                <div class="event-line">{{ event }}</div>
-                            {% endfor %}
-                        </div>
-                        <form method="post">
-                            <button class="session-btn {{ 'danger' if settings.is_started else '' }}" type="submit" name="action" value="toggle_start">
-                                {{ 'Logout' if settings.is_started else 'Login / Start' }}
-                            </button>
-                        </form>
-                        <form method="post">
-                            <button class="secondary-btn" type="submit" name="action" value="stop_scanner" {% if not settings.is_started %}disabled{% endif %}>
-                                Stop Scanner
-                            </button>
-                        </form>
+        <div class="scanner-main-grid scanner-main-single" id="main-grid">
+            <div class="panel-block">
+                <div class="panel-block-header scanner-panel-head">
+                    <span>Scanner hits <span style="font-weight:500;color:var(--muted);">· repeat hits highlighted green</span></span>
+                    <div class="scanner-symbol-search" role="search">
+                        <label class="visually-hidden" for="symbol-search-input">Search symbol</label>
+                        <input type="search" id="symbol-search-input" class="scanner-search-field" placeholder="Search symbol (e.g. RELIANCE)" autocomplete="off" spellcheck="false">
+                        <button type="button" class="toolbar-btn toolbar-btn-start scanner-search-btn" id="symbol-search-btn">Search</button>
+                        <button type="button" class="toolbar-btn toolbar-btn-settings scanner-clear-btn" id="symbol-search-clear">Clear</button>
                     </div>
                 </div>
-            </details>
-        </aside>
+                <div class="scanner-table-wrap">
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th>#</th>
+                                <th>Hit #</th>
+                                <th>Symbol</th>
+                                <th>LTP</th>
+                                <th>Time</th>
+                                <th>RVOL</th>
+                                <th>LTP %</th>
+                                <th>Value (Cr)</th>
+                                <th>Rule</th>
+                                <th>★</th>
+                            </tr>
+                        </thead>
+                        <tbody id="scanner-table-body">
+                            {% if all_symbols %}
+                                {% for stock in all_symbols %}
+                                <tr class="{% if stock.symbol_repeat %}scanner-row-repeat{% endif %}" data-symbol="{{ stock.symbol|lower }}">
+                                    <td>{{ loop.index }}</td>
+                                    <td>{{ stock.hits }}</td>
+                                    <td>{{ stock.symbol }}</td>
+                                    <td>{{ stock.ltp }}</td>
+                                    <td>{{ stock.time }}</td>
+                                    <td>{{ stock.relative_vol }}x</td>
+                                    <td>{{ stock.change_pct }}</td>
+                                    <td>{{ stock.trade_value_cr }}</td>
+                                    <td>{{ stock.condition }}</td>
+                                    <td>
+                                        {% if stock.symbol in watchlist %}
+                                            <button class="watch-icon-btn saved" type="button" title="In watchlist" aria-label="In watchlist">★</button>
+                                        {% else %}
+                                            <form method="post" class="inline-form">
+                                                <input type="hidden" name="action" value="add_watch_symbol">
+                                                <input type="hidden" name="symbol_to_add" value="{{ stock.symbol }}">
+                                                <button class="watch-icon-btn" type="submit" title="Add to watchlist" aria-label="Add to watchlist">☆</button>
+                                            </form>
+                                        {% endif %}
+                                    </td>
+                                </tr>
+                                {% endfor %}
+                            {% else %}
+                                <tr>
+                                    <td colspan="10" class="empty-row">No hits yet. Start the scanner and wait for rules to match.</td>
+                                </tr>
+                            {% endif %}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+
+        <details class="activity-block" open>
+            <summary>Activity log</summary>
+            <p class="engine-status-line" id="engine-status-text">
+                {{ engine_status.last_message }}{% if engine_status.last_error %} — {{ engine_status.last_error }}{% endif %}
+            </p>
+            <div class="event-log-inner" id="event-log">
+                {% for event in engine_events %}
+                <div class="event-line">{{ event }}</div>
+                {% endfor %}
+            </div>
+        </details>
     </div>
+
+    <div class="modal-backdrop" id="settings-modal" role="dialog" aria-modal="true" aria-labelledby="settings-modal-title">
+        <div class="modal-panel">
+            <div class="modal-head">
+                <h2 id="settings-modal-title">Tick Query Criteria</h2>
+                <button type="button" class="modal-close" id="close-settings" aria-label="Close">&times;</button>
+            </div>
+            <div class="modal-body">
+                <form method="post" id="settings-form-fields">
+                    <input type="hidden" name="action" value="save_settings">
+                    <input type="hidden" name="metric_source" value="vol_traded_today_delta">
+                    <div class="settings-criteria-row">
+                        <label for="rule1_value_cr">Value &gt;</label>
+                        <input type="number" min="1" id="rule1_value_cr" name="rule1_value_cr" value="{{ settings.rule1_value_cr }}" required>
+                        <span class="criteria-suffix">Cr</span>
+                    </div>
+                    <div class="settings-criteria-row">
+                        <label for="rule1_vol">Volume &gt; SMA x</label>
+                        <input type="number" min="1" id="rule1_vol" name="rule1_volume_multiplier" value="{{ settings.rule1_volume_multiplier }}" required>
+                    </div>
+                    <div class="settings-criteria-row">
+                        <label for="sma_period">SMA Period</label>
+                        <input type="number" min="1" id="sma_period" name="rule1_sma_period" value="{{ settings.rule1_sma_period }}" required>
+                    </div>
+                    <div class="modal-actions" style="border-top:none;padding-top:12px;margin-top:8px;">
+                        <button type="button" class="btn-secondary" id="close-settings-2">Close</button>
+                        <button type="submit" class="btn-primary">Save</button>
+                    </div>
+                </form>
+                <div class="watchlist-modal-section" style="margin-top:18px;padding-top:14px;border-top:1px solid var(--border);">
+                    <h3>Watchlist</h3>
+                    {% if watchlist %}
+                        {% for symbol in watchlist %}
+                        <div class="watch-row-modal">
+                            <span>{{ symbol }}</span>
+                            <form method="post" style="margin:0;">
+                                <input type="hidden" name="action" value="remove_watch_symbol">
+                                <input type="hidden" name="symbol_to_remove" value="{{ symbol }}">
+                                <button type="submit" class="remove-btn-modal">Remove</button>
+                            </form>
+                        </div>
+                        {% endfor %}
+                    {% else %}
+                        <p class="modal-hint" style="margin:0;">No symbols saved.</p>
+                    {% endif %}
+                    <form method="post" class="add-watch-row">
+                        <input type="hidden" name="action" value="add_watch_symbol">
+                        <input type="text" name="symbol_to_add" placeholder="NSE:SYMBOL-EQ" autocomplete="off">
+                        <button type="submit" class="btn-primary" style="padding:8px 14px;">Add</button>
+                    </form>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <script>
-        const appShell = document.getElementById("app-shell");
-        const toggleBtn = document.getElementById("toggle-sidebar-btn");
-        const expandBtn = document.getElementById("expand-sidebar-btn");
-        const settingsBox = document.getElementById("settings-box");
-        const watchlistViewBtn = document.getElementById("watchlist-view-btn");
-        const allSymbolsViewBtn = document.getElementById("all-symbols-view-btn");
-        const watchlistSection = document.getElementById("watchlist-section");
-        const watchlistSectionLabel = document.getElementById("watchlist-section-label");
-        const allSymbolsSection = document.getElementById("all-symbols-section");
-        const allSymbolsSectionLabel = document.getElementById("all-symbols-section-label");
-        const watchlistTableBody = document.getElementById("watchlist-table-body");
-        const allSymbolsTableBody = document.getElementById("all-symbols-table-body");
+        const symbolSearchInput = document.getElementById("symbol-search-input");
+        const symbolSearchBtn = document.getElementById("symbol-search-btn");
+        const symbolSearchClear = document.getElementById("symbol-search-clear");
+        const symbolSearchStorageKey = "scanner-hit-symbol-query";
+
+        const livePill = document.getElementById("live-pill");
+        const livePillText = document.getElementById("live-pill-text");
+        const statUniverse = document.getElementById("stat-universe");
+        const statBaseline = document.getElementById("stat-baseline");
+        const statMessage = document.getElementById("stat-message");
+        const tableBody = document.getElementById("scanner-table-body");
         const engineStatusText = document.getElementById("engine-status-text");
         const eventLog = document.getElementById("event-log");
-        const storageKey = "scanner-sidebar-collapsed";
-        const viewStorageKey = "scanner-table-view";
-        const windowScrollKey = "scanner-window-scroll-y";
-        const allSectionScrollKey = "scanner-all-section-scroll-top";
-        const watchSectionScrollKey = "scanner-watch-section-scroll-top";
+        const settingsModal = document.getElementById("settings-modal");
+        const openSettings = document.getElementById("open-settings");
+        const closeSettings = document.getElementById("close-settings");
+        const closeSettings2 = document.getElementById("close-settings-2");
+        const filterAll = document.getElementById("filter-all");
+        const filterWatch = document.getElementById("filter-watch");
 
-        const applyCollapsed = (collapsed) => {
-            appShell.classList.toggle("sidebar-collapsed", collapsed);
-            if (collapsed) {
-                settingsBox.removeAttribute("open");
-                expandBtn.style.display = "inline-block";
-                toggleBtn.style.display = "none";
-            } else {
-                settingsBox.setAttribute("open", "open");
-                expandBtn.style.display = "none";
-                toggleBtn.style.display = "inline-block";
-            }
+        try {
+            const host = window.location.hostname;
+            const port = window.location.port || (window.location.protocol === "https:" ? "443" : "80");
+            const el = document.getElementById("lan-hint-host");
+            if (el) el.textContent = host + (port && port !== "80" && port !== "443" ? ":" + port : "");
+        } catch (_) {}
+
+        const applyScannerSymbolFilter = () => {
+            if (!tableBody) return;
+            const q = (symbolSearchInput?.value || "").trim().toLowerCase();
+            const dataRows = tableBody.querySelectorAll("tr[data-symbol]");
+            dataRows.forEach((tr) => {
+                const sym = tr.getAttribute("data-symbol") || "";
+                tr.style.display = !q || sym.includes(q) ? "" : "none";
+            });
         };
 
-        applyCollapsed(localStorage.getItem(storageKey) === "1");
-        toggleBtn.addEventListener("click", () => {
-            const collapsed = !appShell.classList.contains("sidebar-collapsed");
-            applyCollapsed(collapsed);
-            localStorage.setItem(storageKey, collapsed ? "1" : "0");
+        if (symbolSearchInput) {
+            symbolSearchInput.value = localStorage.getItem(symbolSearchStorageKey) || "";
+        }
+        symbolSearchBtn?.addEventListener("click", () => applyScannerSymbolFilter());
+        symbolSearchClear?.addEventListener("click", () => {
+            if (symbolSearchInput) symbolSearchInput.value = "";
+            localStorage.removeItem(symbolSearchStorageKey);
+            applyScannerSymbolFilter();
         });
-        expandBtn.addEventListener("click", () => {
-            applyCollapsed(false);
-            localStorage.setItem(storageKey, "0");
+        symbolSearchInput?.addEventListener("keydown", (e) => {
+            if (e.key === "Enter") {
+                e.preventDefault();
+                applyScannerSymbolFilter();
+            }
         });
-        settingsBox.addEventListener("toggle", () => {
-            const collapsed = !settingsBox.open;
-            appShell.classList.toggle("sidebar-collapsed", collapsed);
-            expandBtn.style.display = collapsed ? "inline-block" : "none";
-            toggleBtn.style.display = collapsed ? "none" : "inline-block";
-            localStorage.setItem(storageKey, collapsed ? "1" : "0");
+        symbolSearchInput?.addEventListener("input", () => {
+            localStorage.setItem(symbolSearchStorageKey, symbolSearchInput?.value || "");
         });
 
-        const applyView = (viewMode) => {
-            const isWatchlist = viewMode === "watchlist";
-            watchlistSection.style.display = isWatchlist ? "block" : "none";
-            watchlistSectionLabel.style.display = isWatchlist ? "block" : "none";
-            allSymbolsSection.style.display = isWatchlist ? "none" : "block";
-            allSymbolsSectionLabel.style.display = isWatchlist ? "none" : "block";
-            watchlistViewBtn.classList.toggle("active-view-btn", isWatchlist);
-            allSymbolsViewBtn.classList.toggle("active-view-btn", !isWatchlist);
-            localStorage.setItem(viewStorageKey, viewMode);
+        let viewMode = "all";
+        const setFilterUi = () => {
+            if (!filterAll || !filterWatch) return;
+            const allOn = viewMode === "all";
+            filterAll.style.opacity = allOn ? "1" : "0.75";
+            filterWatch.style.opacity = allOn ? "0.75" : "1";
+            filterAll.style.outline = allOn ? "2px solid var(--accent)" : "none";
+            filterWatch.style.outline = !allOn ? "2px solid var(--accent)" : "none";
         };
+        filterAll?.addEventListener("click", () => { viewMode = "all"; setFilterUi(); pollDashboardData(); });
+        filterWatch?.addEventListener("click", () => { viewMode = "watchlist"; setFilterUi(); pollDashboardData(); });
+        setFilterUi();
 
-        applyView(localStorage.getItem(viewStorageKey) || "all");
-        watchlistViewBtn.addEventListener("click", () => applyView("watchlist"));
-        allSymbolsViewBtn.addEventListener("click", () => applyView("all"));
-
-        // Preserve scroll position across auto-refresh so users stay where they are.
-        const rememberScroll = () => {
-            localStorage.setItem(windowScrollKey, String(window.scrollY || 0));
-            if (allSymbolsSection) {
-                localStorage.setItem(allSectionScrollKey, String(allSymbolsSection.scrollTop || 0));
-            }
-            if (watchlistSection) {
-                localStorage.setItem(watchSectionScrollKey, String(watchlistSection.scrollTop || 0));
-            }
+        const openModal = () => {
+            settingsModal?.classList.add("open");
         };
-        window.addEventListener("beforeunload", rememberScroll);
-
-        const restoreScroll = () => {
-            const y = parseInt(localStorage.getItem(windowScrollKey) || "0", 10);
-            const allTop = parseInt(localStorage.getItem(allSectionScrollKey) || "0", 10);
-            const watchTop = parseInt(localStorage.getItem(watchSectionScrollKey) || "0", 10);
-            window.scrollTo(0, Number.isNaN(y) ? 0 : y);
-            if (allSymbolsSection && !Number.isNaN(allTop)) {
-                allSymbolsSection.scrollTop = allTop;
-            }
-            if (watchlistSection && !Number.isNaN(watchTop)) {
-                watchlistSection.scrollTop = watchTop;
-            }
+        const closeModal = () => {
+            settingsModal?.classList.remove("open");
         };
-        restoreScroll();
+        openSettings?.addEventListener("click", openModal);
+        closeSettings?.addEventListener("click", closeModal);
+        closeSettings2?.addEventListener("click", closeModal);
+        settingsModal?.addEventListener("click", (e) => {
+            if (e.target === settingsModal) closeModal();
+        });
+        document.addEventListener("keydown", (e) => {
+            if (e.key === "Escape") closeModal();
+        });
 
         const buildWatchButton = (stock, watchlistSet) => {
             if (watchlistSet.has(stock.symbol)) {
@@ -316,30 +289,37 @@
             }
             return `<form method="post" class="inline-form">
                 <input type="hidden" name="action" value="add_watch_symbol">
-                <input type="hidden" name="symbol_to_add" value="${stock.symbol}">
-                <button class="watch-icon-btn" type="submit" title="Save to watchlist" aria-label="Save to watchlist">☆</button>
+                <input type="hidden" name="symbol_to_add" value="${(stock.symbol || "").replace(/"/g, "&quot;")}">
+                <button class="watch-icon-btn" type="submit" title="Add to watchlist" aria-label="Add to watchlist">☆</button>
             </form>`;
         };
 
-        const renderRows = (targetBody, rows, watchlist, emptyText) => {
-            if (!targetBody) return;
+        const filterRows = (rows, watchlist, mode) => {
+            if (mode !== "watchlist") return rows || [];
+            if (!watchlist || watchlist.length === 0) return [];
+            const w = new Set(watchlist);
+            return (rows || []).filter((r) => w.has(r.symbol));
+        };
+
+        const renderScannerRows = (rows, watchlist, emptyText) => {
+            if (!tableBody) return;
             if (!rows || rows.length === 0) {
-                targetBody.innerHTML = `<tr><td colspan="10" class="empty-row">${emptyText}</td></tr>`;
+                tableBody.innerHTML = `<tr><td colspan="10" class="empty-row">${emptyText}</td></tr>`;
                 return;
             }
-            const watchlistSet = new Set(watchlist || []);
-            targetBody.innerHTML = rows.map((stock) => `
-                <tr class="${stock.symbol_repeat ? "scanner-row-repeat" : ""}">
-                    <td>${stock.time ?? "-"}</td>
+            const wl = new Set(watchlist || []);
+            tableBody.innerHTML = rows.map((stock, i) => `
+                <tr class="${stock.symbol_repeat ? "scanner-row-repeat" : ""}" data-symbol="${String(stock.symbol || "").toLowerCase()}">
+                    <td>${i + 1}</td>
+                    <td>${stock.hits ?? "-"}</td>
                     <td>${stock.symbol ?? "-"}</td>
                     <td>${stock.ltp ?? "-"}</td>
-                    <td>${stock.change_pct ?? "-"}</td>
+                    <td>${stock.time ?? "-"}</td>
                     <td>${stock.relative_vol ?? "-"}x</td>
-                    <td>${stock.metric_source ?? "-"}: ${stock.metric_value ?? "-"}</td>
+                    <td>${stock.change_pct ?? "-"}</td>
                     <td>${stock.trade_value_cr ?? "-"}</td>
                     <td>${stock.condition ?? "-"}</td>
-                    <td>${stock.hits ?? "-"}</td>
-                    <td>${buildWatchButton(stock, watchlistSet)}</td>
+                    <td>${buildWatchButton(stock, wl)}</td>
                 </tr>
             `).join("");
         };
@@ -349,31 +329,46 @@
                 const resp = await fetch("/api/dashboard-data", { cache: "no-store" });
                 if (!resp.ok) return;
                 const data = await resp.json();
-                renderRows(
-                    watchlistTableBody,
-                    data.watchlist_symbols || [],
-                    data.watchlist || [],
-                    "No watchlist symbols matching criteria yet."
-                );
-                renderRows(
-                    allSymbolsTableBody,
-                    data.all_symbols || [],
-                    data.watchlist || [],
-                    "No symbols matching criteria yet."
-                );
+                const rows = filterRows(data.all_symbols, data.watchlist, viewMode);
+                const emptyMsg = viewMode === "watchlist"
+                    ? "No watchlist hits yet. Add symbols to the watchlist in Settings."
+                    : "No hits yet. Start the scanner and wait for rules to match.";
+                renderScannerRows(rows, data.watchlist, emptyMsg);
+                applyScannerSymbolFilter();
+
+                if (statUniverse && data.universe_total != null) statUniverse.textContent = String(data.universe_total);
+                if (statBaseline && data.baseline_loaded_count != null) statBaseline.textContent = String(data.baseline_loaded_count);
+                if (statMessage) statMessage.textContent = data.last_message || "Idle";
+
+                if (livePill && livePillText) {
+                    if (data.is_started) {
+                        livePill.classList.add("on");
+                        livePillText.textContent = "Live";
+                    } else {
+                        livePill.classList.remove("on");
+                        livePillText.textContent = "Idle";
+                    }
+                }
+
                 if (engineStatusText) {
-                    const err = data.last_error ? ` - ${data.last_error}` : "";
+                    const err = data.last_error ? ` — ${data.last_error}` : "";
                     engineStatusText.textContent = `${data.last_message || "Idle"}${err}`;
                 }
                 if (eventLog && Array.isArray(data.events)) {
                     eventLog.innerHTML = data.events.map((e) => `<div class="event-line">${e}</div>`).join("");
                 }
-            } catch (_) {
-                // keep current UI on transient polling failure
-            }
+
+                document.querySelectorAll('button[name="action"][value="start_scanner"]').forEach((b) => {
+                    b.disabled = !!data.is_started;
+                });
+                document.querySelectorAll('button[name="action"][value="stop_scanner"]').forEach((b) => {
+                    b.disabled = !data.is_started;
+                });
+            } catch (_) {}
         };
 
         setInterval(pollDashboardData, 2000);
+        applyScannerSymbolFilter();
     </script>
 </body>
 </html>

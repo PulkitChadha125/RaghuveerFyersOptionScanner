@@ -3,35 +3,65 @@
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Sample Data - Scanner</title>
+    <title>Sample Data — Raghuveer Scanner</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
 </head>
-<body>
-    <div class="app-shell" id="app-shell">
-        <main class="stock-panel">
-            <header class="topbar">
-                <div>
-                    <h1>Sample Data</h1>
-                    <p class="subtle">Baseline VTT at start of current minute, current cumulative volume, delta in that minute, and delta × LTP (₹).</p>
-                    <p class="subtle">IST minute: <strong id="minute-key-text">{{ minute_key }}</strong></p>
-                    <p class="subtle"><a href="{{ url_for('home') }}">Back to scanner dashboard</a></p>
-                </div>
-            </header>
+<body class="sample-page">
+    <div class="scanner-app">
+        <header class="scanner-header">
+            <div class="scanner-header-left">
+                <button type="button" class="menu-icon-btn" disabled style="opacity:0.4;" aria-hidden="true" title="—">
+                    <span></span><span></span><span></span>
+                </button>
+                <h1 class="scanner-title">Sample data</h1>
+            </div>
+            <div class="live-pill {% if settings.is_started %}on{% endif %}">
+                <span class="dot" aria-hidden="true"></span>
+                <span>{% if settings.is_started %}Live{% else %}Idle{% endif %}</span>
+            </div>
+        </header>
 
-            <section class="section-label">Symbols ({{ sample_rows|length }})</section>
-            <section style="margin: 8px 0 12px 0;">
-                <input
-                    id="symbol-search-input"
-                    type="text"
-                    placeholder="Search symbol (e.g. NSE:UPL-EQ)"
-                    style="width: 100%; max-width: 420px; padding: 8px 10px; border: 1px solid #cfd4dc; border-radius: 8px;"
-                >
-            </section>
-            <section class="table-wrap" id="sample-table-wrap">
-                <table>
+        <div class="scanner-toolbar">
+            <form method="post" action="{{ url_for('home') }}" style="margin:0;">
+                <button class="toolbar-btn toolbar-btn-start" type="submit" name="action" value="start_scanner" {% if settings.is_started %}disabled{% endif %}>Start</button>
+            </form>
+            <form method="post" action="{{ url_for('home') }}" style="margin:0;">
+                <button class="toolbar-btn toolbar-btn-stop" type="submit" name="action" value="stop_scanner" {% if not settings.is_started %}disabled{% endif %}>Stop</button>
+            </form>
+            <div class="nav-pill">
+                <a href="{{ url_for('home') }}">Scanner</a>
+                <a href="{{ url_for('sample_data') }}" class="active">Sample data</a>
+            </div>
+        </div>
+
+        <p class="info-banner">
+            IST minute: <strong id="minute-key-text">{{ minute_key }}</strong> · Baseline VTT at minute start, current VTT, diff, and value (₹).
+        </p>
+
+        <section class="panel-block" style="margin-top:0.75rem;">
+            <div class="panel-block-header">Websocket debug (latest raw payload)</div>
+            <div style="font-size:12px; color:#7a6d5f; margin:0.35rem 0 0.6rem 0;">
+                Received at: <strong id="ws-raw-at">{{ ws_debug.last_raw_received_at if ws_debug else "--" }}</strong>
+                · Ticks: <strong id="ws-tick-counts">total={{ ws_debug.total_ticks if ws_debug else 0 }}, symbol={{ ws_debug.symbol_ticks if ws_debug else 0 }}, control={{ ws_debug.control_ticks if ws_debug else 0 }}</strong>
+                · Feed lag(s): <strong id="ws-feed-lag">{{ ws_debug.last_symbol_feed_lag_sec if ws_debug and ws_debug.last_symbol_feed_lag_sec is not none else "-" }}</strong>
+            </div>
+            <pre id="ws-raw-json" style="margin:0; white-space:pre-wrap; word-break:break-word; background:#f7f2eb; border:1px solid #eadfce; border-radius:8px; padding:10px; font-size:12px; line-height:1.35;">{{ (ws_debug.last_raw_message if ws_debug else {}) | tojson(indent=2) }}</pre>
+        </section>
+
+        <section class="panel-block" style="margin-top:0;">
+            <div class="panel-block-header">Symbols ({{ sample_rows|length }})</div>
+            <input
+                class="sample-search"
+                id="symbol-search-input"
+                type="search"
+                placeholder="Search symbol (e.g. NSE:UPL-EQ)"
+                autocomplete="off"
+            >
+            <div class="scanner-table-wrap" id="sample-table-wrap" style="max-height:min(70vh,720px);">
+                <table class="data-table">
                     <thead>
                         <tr>
                             <th>Symbol</th>
@@ -59,8 +89,8 @@
                         {% endif %}
                     </tbody>
                 </table>
-            </section>
-        </main>
+            </div>
+        </section>
     </div>
     <script>
         const windowScrollKey = "scanner-sample-window-scroll-y";
@@ -70,6 +100,10 @@
         const searchInput = document.getElementById("symbol-search-input");
         const tableBody = document.getElementById("sample-table-body");
         const minuteKeyText = document.getElementById("minute-key-text");
+        const wsRawAt = document.getElementById("ws-raw-at");
+        const wsTickCounts = document.getElementById("ws-tick-counts");
+        const wsFeedLag = document.getElementById("ws-feed-lag");
+        const wsRawJson = document.getElementById("ws-raw-json");
         let latestSeq = 0;
         let latestMinute = minuteKeyText ? minuteKeyText.textContent.trim() : "";
 
@@ -80,31 +114,22 @@
             return n.toLocaleString("en-IN", { maximumFractionDigits: 2 });
         };
 
-        const rememberScroll = () => {
+        window.addEventListener("beforeunload", () => {
             localStorage.setItem(windowScrollKey, String(window.scrollY || 0));
-            if (tableWrap) {
-                localStorage.setItem(tableScrollKey, String(tableWrap.scrollTop || 0));
-            }
-        };
+            if (tableWrap) localStorage.setItem(tableScrollKey, String(tableWrap.scrollTop || 0));
+        });
 
-        window.addEventListener("beforeunload", rememberScroll);
-
-        const restoreScroll = () => {
+        (() => {
             const y = parseInt(localStorage.getItem(windowScrollKey) || "0", 10);
             const tableTop = parseInt(localStorage.getItem(tableScrollKey) || "0", 10);
             window.scrollTo(0, Number.isNaN(y) ? 0 : y);
-            if (tableWrap && !Number.isNaN(tableTop)) {
-                tableWrap.scrollTop = tableTop;
-            }
-        };
-
-        restoreScroll();
+            if (tableWrap && !Number.isNaN(tableTop)) tableWrap.scrollTop = tableTop;
+        })();
 
         const applySearchFilter = () => {
             if (!tableBody || !searchInput) return;
             const query = (searchInput.value || "").trim().toLowerCase();
-            const rows = tableBody.querySelectorAll("tr[data-symbol]");
-            rows.forEach((row) => {
+            tableBody.querySelectorAll("tr[data-symbol]").forEach((row) => {
                 const symbol = row.getAttribute("data-symbol") || "";
                 row.style.display = symbol.includes(query) ? "" : "none";
             });
@@ -134,9 +159,7 @@
                 return;
             }
             tableBody.innerHTML = rows.map((row) => `
-                <tr data-symbol="${String(row.symbol || "").toLowerCase()}">
-                    ${rowHtml(row)}
-                </tr>
+                <tr data-symbol="${String(row.symbol || "").toLowerCase()}">${rowHtml(row)}</tr>
             `).join("");
             applySearchFilter();
         };
@@ -144,13 +167,11 @@
         const upsertSampleRows = (rows) => {
             if (!tableBody || !rows || rows.length === 0) return;
             for (const row of rows) {
-                const symbol = String(row.symbol || "");
-                const key = symbol.toLowerCase();
+                const key = String(row.symbol || "").toLowerCase();
                 let tr = tableBody.querySelector(`tr[data-symbol="${key}"]`);
                 const html = rowHtml(row);
-                if (tr) {
-                    tr.innerHTML = html;
-                } else {
+                if (tr) tr.innerHTML = html;
+                else {
                     tr = document.createElement("tr");
                     tr.setAttribute("data-symbol", key);
                     tr.innerHTML = html;
@@ -160,28 +181,42 @@
             applySearchFilter();
         };
 
+        const renderWsDebug = (ws) => {
+            if (!ws) return;
+            if (wsRawAt) wsRawAt.textContent = ws.last_raw_received_at || "--";
+            if (wsTickCounts) {
+                wsTickCounts.textContent = `total=${ws.total_ticks ?? 0}, symbol=${ws.symbol_ticks ?? 0}, control=${ws.control_ticks ?? 0}`;
+            }
+            if (wsFeedLag) {
+                wsFeedLag.textContent = (ws.last_symbol_feed_lag_sec === null || ws.last_symbol_feed_lag_sec === undefined)
+                    ? "-"
+                    : String(ws.last_symbol_feed_lag_sec);
+            }
+            if (wsRawJson) {
+                const msg = ws.last_raw_message || {};
+                try {
+                    wsRawJson.textContent = JSON.stringify(msg, null, 2);
+                } catch (_) {
+                    wsRawJson.textContent = String(msg);
+                }
+            }
+        };
+
+        renderWsDebug({{ ws_debug | tojson }});
+
         const pollSampleData = async () => {
             try {
-                const params = new URLSearchParams({
-                    since_seq: String(latestSeq),
-                    since_minute: latestMinute,
-                });
+                const params = new URLSearchParams({ since_seq: String(latestSeq), since_minute: latestMinute });
                 const resp = await fetch(`/api/sample-data?${params.toString()}`, { cache: "no-store" });
                 if (!resp.ok) return;
                 const data = await resp.json();
-                if (minuteKeyText && data.minute_key) {
-                    minuteKeyText.textContent = data.minute_key;
-                }
+                if (minuteKeyText && data.minute_key) minuteKeyText.textContent = data.minute_key;
                 latestMinute = data.minute_key || latestMinute;
                 latestSeq = Number.isFinite(Number(data.seq)) ? Number(data.seq) : latestSeq;
-                if (data.full) {
-                    renderSampleRows(data.rows || []);
-                } else {
-                    upsertSampleRows(data.rows || []);
-                }
-            } catch (_) {
-                // keep current UI on transient polling failure
-            }
+                if (data.full) renderSampleRows(data.rows || []);
+                else upsertSampleRows(data.rows || []);
+                renderWsDebug(data.ws_debug || null);
+            } catch (_) {}
         };
 
         setInterval(pollSampleData, 2000);

@@ -10,6 +10,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from pathlib import Path
+from collections.abc import Iterable
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -37,6 +38,27 @@ AUTO_WS_START_HOUR_IST = 9
 AUTO_WS_START_MINUTE_IST = 15
 IST_ZONE = ZoneInfo("Asia/Kolkata")
 LOG_WS_TICK_LATENCY = False
+# Fyers SDK appends each subscribe to internal scrips_per_channel; unsubscribe first on resubscribe.
+WS_RESUBSCRIBE_SETTLE_SEC = 2.0
+WS_SYMBOL_DATA_TYPE = "SymbolUpdate"
+# After a resubscribe burst, avoid churning subscribe/unsubscribe when the tape stays quiet.
+WS_RESUBSCRIBE_COOLDOWN_SEC = 90.0
+# If last symbol tick's exchange epoch is this far behind wall clock, resubscribe only replays stale LTP.
+WS_EXCHANGE_TIME_STALE_SKIP_RESUB_SEC = 600.0
+WS_STALE_FEED_NOTICE_INTERVAL_SEC = 300.0
+
+
+def dedupe_symbols_preserve_order(symbols: Iterable[str]) -> list[str]:
+    """Strip, drop empties, first occurrence wins (stable order)."""
+    seen: set[str] = set()
+    out: list[str] = []
+    for sym in symbols:
+        s = str(sym).strip()
+        if not s or s in seen:
+            continue
+        seen.add(s)
+        out.append(s)
+    return out
 
 
 def shortlist_session_date_ist(now: datetime | None = None) -> str:
@@ -56,6 +78,14 @@ WS_LATENCY_SUMMARY_INTERVAL_SECS = 2.0
 # Evaluate rules on cached websocket state every 1s; UI polls every 2s (templates).
 EVAL_INTERVAL_SECS = 1.0
 SHORTLIST_MAX_EVENTS = 2000
+EVAL_CONSOLE_HEARTBEAT = True
+DEBUG_PRINT_SUBSCRIBED_SYMBOLS = True
+DEBUG_PRINT_WS_RAW_MESSAGES = True
+WS_RAW_MAX_PRINTS_PER_SEC = 12
+WS_SUBSCRIBE_SYMBOLS_PREVIEW_COUNT = 20
+# Print latest websocket payload every eval second (for live feed diagnostics).
+DEBUG_PRINT_WS_FEED_EVERY_SEC = True
+WS_FEED_PRINT_MAX_CHARS = 700
 
 data_socket: data_ws.FyersDataSocket | None = None
 
@@ -63,6 +93,7 @@ data_socket: data_ws.FyersDataSocket | None = None
 def close_fyres_websocket() -> None:
     """
     Close the active Fyers data websocket connection, if any.
+    Clears fyers_apiv3's process-wide singleton so the next session builds a fresh client.
     """
     global data_socket
     try:
@@ -76,12 +107,16 @@ def close_fyres_websocket() -> None:
                 pass
             # Ask the socket to close its underlying websocket connection.
             data_socket.close_connection()
-            # Drop our reference so a fresh socket can be created on next start.
-            data_socket = None
         else:
             print("[WS] close_fyres_websocket called but no active socket.")
     except Exception as e:
         print("[WS] Error while closing FyersDataSocket:", e)
+    finally:
+        data_socket = None
+        try:
+            setattr(data_ws.FyersDataSocket, "_instance", None)
+        except Exception:
+            pass
 
 
 @dataclass
@@ -97,7 +132,8 @@ class EngineStatus:
 class ScannerEngine:
     def __init__(self) -> None:
         self.status = EngineStatus()
-        self._lock = threading.Lock()
+        # Re-entrant lock prevents self-deadlock when logging from locked sections.
+        self._lock = threading.RLock()
         self._worker: threading.Thread | None = None
         self._stop_event = threading.Event()
         self._ws_client: data_ws.FyersDataSocket | None = None
@@ -119,11 +155,25 @@ class ScannerEngine:
         self._scan_ready_from_next_minute = False
         self._last_tick_by_symbol: dict[str, dict[str, Any]] = {}
         self._ws_update_seq = 0
+        self._subscribed_symbols: list[str] = []
+        self._last_ws_msg_monotonic: float = 0.0
+        self._last_ws_health_log_monotonic: float = 0.0
+        self._last_ws_resubscribe_monotonic: float = 0.0
+        self._ws_last_symbol_feed_epoch: float | None = None
+        self._last_ws_stale_feed_notice_monotonic: float = 0.0
+        self._ws_last_raw_message: dict[str, Any] = {}
+        self._ws_last_raw_received_at: str = "--"
+        self._ws_last_message_summary: dict[str, Any] = {}
+        self._ws_msg_count_last_heartbeat: int = 0
+        self._ws_symbol_msg_count: int = 0
+        self._ws_nonsymbol_msg_count: int = 0
+        self._ws_symbol_msg_count_last_heartbeat: int = 0
+        self._ws_nonsymbol_msg_count_last_heartbeat: int = 0
+        self._ws_raw_log_window_sec: int = 0
+        self._ws_raw_log_count: int = 0
         self._scan_config: dict[str, Any] = {
             "rule1_volume_multiplier": 30,
             "rule1_value_cr": 4,
-            "rule2_volume_multiplier": 10,
-            "rule2_value_cr": 8,
             "metric_source": "vol_traded_today_delta",
             "watchlist": [],
         }
@@ -135,6 +185,12 @@ class ScannerEngine:
         self._eval_run_id = 0
         with self._lock:
             self._bootstrap_shortlist_state_locked()
+
+    def _try_acquire_lock(self, timeout_secs: float = 1.0) -> bool:
+        try:
+            return bool(self._lock.acquire(timeout=timeout_secs))
+        except Exception:  # noqa: BLE001
+            return False
 
     def start(
         self,
@@ -164,6 +220,22 @@ class ScannerEngine:
             self._scan_ready_from_next_minute = False
             self._last_tick_by_symbol = {}
             self._ws_update_seq = 0
+            self._subscribed_symbols = []
+            self._last_ws_msg_monotonic = 0.0
+            self._last_ws_health_log_monotonic = 0.0
+            self._last_ws_resubscribe_monotonic = 0.0
+            self._ws_last_symbol_feed_epoch = None
+            self._last_ws_stale_feed_notice_monotonic = 0.0
+            self._ws_last_raw_message = {}
+            self._ws_last_raw_received_at = "--"
+            self._ws_last_message_summary = {}
+            self._ws_msg_count_last_heartbeat = 0
+            self._ws_symbol_msg_count = 0
+            self._ws_nonsymbol_msg_count = 0
+            self._ws_symbol_msg_count_last_heartbeat = 0
+            self._ws_nonsymbol_msg_count_last_heartbeat = 0
+            self._ws_raw_log_window_sec = 0
+            self._ws_raw_log_count = 0
             self._eval_stop_event.clear()
             self._eval_run_id = run_id
             if scan_config:
@@ -172,7 +244,7 @@ class ScannerEngine:
                 target=self._run_pipeline,
                 args=(sma_period, run_id, websocket_start_at_ist),
                 name="scanner-engine",
-                daemon=True,
+                daemon=False,
             )
             self._worker.start()
 
@@ -295,7 +367,17 @@ class ScannerEngine:
             self._push_event("Pipeline stopped by user.")
 
     def snapshot(self) -> EngineStatus:
-        with self._lock:
+        if not self._try_acquire_lock(timeout_secs=1.0):
+            # Never block HTTP requests indefinitely; return best-effort view.
+            return EngineStatus(
+                is_running=self.status.is_running,
+                last_message=self.status.last_message or "Busy",
+                last_error=self.status.last_error,
+                last_started_at=self.status.last_started_at,
+                recent_events=[],
+                shortlisted_rows=[],
+            )
+        try:
             self._ensure_shortlist_session_locked()
             self._reload_shortlist_if_disk_newer()
             rows = list(reversed(self._shortlist_events))[:300]
@@ -307,9 +389,22 @@ class ScannerEngine:
                 recent_events=list(self._recent_events),
                 shortlisted_rows=rows,
             )
+        finally:
+            self._lock.release()
+
+    def baseline_loaded_count(self) -> int:
+        if not self._try_acquire_lock(timeout_secs=1.0):
+            return 0
+        try:
+            return len(self._baseline_by_symbol)
+        finally:
+            self._lock.release()
 
     def sample_data_snapshot(self) -> tuple[str, list[dict[str, Any]]]:
-        with self._lock:
+        if not self._try_acquire_lock(timeout_secs=1.0):
+            minute_key = datetime.now(IST_ZONE).strftime("%Y-%m-%d %H:%M")
+            return minute_key, []
+        try:
             minute_key = datetime.now(IST_ZONE).strftime("%Y-%m-%d %H:%M")
             rows: list[dict[str, Any]] = []
             for symbol in sorted(self._baseline_by_symbol.keys()):
@@ -344,13 +439,18 @@ class ScannerEngine:
                     }
                 )
             return minute_key, rows
+        finally:
+            self._lock.release()
 
     def sample_data_delta(
         self,
         since_seq: int,
         since_minute: str,
     ) -> tuple[str, int, bool, list[dict[str, Any]]]:
-        with self._lock:
+        if not self._try_acquire_lock(timeout_secs=1.0):
+            minute_key = datetime.now(IST_ZONE).strftime("%Y-%m-%d %H:%M")
+            return minute_key, int(self._ws_update_seq), True, []
+        try:
             minute_key = datetime.now(IST_ZONE).strftime("%Y-%m-%d %H:%M")
             current_seq = int(self._ws_update_seq)
             force_full = since_minute != minute_key
@@ -400,6 +500,33 @@ class ScannerEngine:
                     }
                 )
             return minute_key, current_seq, force_full, rows
+        finally:
+            self._lock.release()
+
+    def websocket_debug_snapshot(self) -> dict[str, Any]:
+        if not self._try_acquire_lock(timeout_secs=1.0):
+            return {
+                "last_raw_received_at": "--",
+                "last_raw_message": {},
+                "last_message_summary": {},
+                "total_ticks": int(self._ws_msg_count),
+                "symbol_ticks": int(self._ws_symbol_msg_count),
+                "control_ticks": int(self._ws_nonsymbol_msg_count),
+                "last_symbol_feed_lag_sec": None,
+            }
+        try:
+            lag = self._ws_exchange_lag_vs_wall_seconds()
+            return {
+                "last_raw_received_at": self._ws_last_raw_received_at,
+                "last_raw_message": dict(self._ws_last_raw_message or {}),
+                "last_message_summary": dict(self._ws_last_message_summary or {}),
+                "total_ticks": int(self._ws_msg_count),
+                "symbol_ticks": int(self._ws_symbol_msg_count),
+                "control_ticks": int(self._ws_nonsymbol_msg_count),
+                "last_symbol_feed_lag_sec": round(float(lag), 2) if lag is not None else None,
+            }
+        finally:
+            self._lock.release()
 
     def _is_active(self, run_id: int) -> bool:
         with self._lock:
@@ -469,8 +596,14 @@ class ScannerEngine:
                 if not self._is_active(run_id):
                     return
 
-            self._set_message("Starting websocket subscriptions...", run_id)
-            self._start_websocket(access_token, symbols, run_id)
+            # One canonical list after history fetch (unique, same order as successful rows).
+            ws_symbols = dedupe_symbols_preserve_order(row["symbol_name"] for row in rows)
+            self._set_message(
+                f"Starting websocket subscriptions for {len(ws_symbols)} symbols "
+                f"(unique post-fetch; CSV had {len(symbols)}).",
+                run_id,
+            )
+            self._start_websocket(access_token, ws_symbols, run_id)
             self._set_message("Running. Websocket subscribed.", run_id)
         except Exception as exc:  # noqa: BLE001
             self._set_error(str(exc))
@@ -482,7 +615,8 @@ class ScannerEngine:
         if not CSV_PATH.exists():
             return []
         df = pd.read_csv(CSV_PATH)
-        all_symbols = [str(x).strip() for x in df.get("symbol_name", []).tolist() if str(x).strip()]
+        raw = [str(x).strip() for x in df.get("symbol_name", []).tolist() if str(x).strip()]
+        all_symbols = dedupe_symbols_preserve_order(raw)
         if BOOTSTRAP_SYMBOL_LIMIT <= 0:
             return all_symbols
         return all_symbols[-BOOTSTRAP_SYMBOL_LIMIT:]
@@ -810,6 +944,11 @@ class ScannerEngine:
             close_fyres_websocket()
             self._ws_client = None
 
+    def _close_all_websockets_before_subscribe(self) -> None:
+        """Best-effort websocket cleanup before starting a fresh subscribe flow."""
+        self._disconnect_ws()
+        self._close_stale_process()
+
     def _close_stale_process(self) -> None:
         if not WS_STATE_PATH.exists():
             return
@@ -836,25 +975,157 @@ class ScannerEngine:
 
     def _evaluation_loop(self, run_id: int) -> None:
         while not self._eval_stop_event.is_set() and self._is_active(run_id):
-            self._evaluate_all_symbols(run_id)
+            processed_symbols, new_hits = self._evaluate_all_symbols(run_id)
+            self._print_eval_console_heartbeat(processed_symbols, new_hits)
+            self._watch_websocket_health(run_id)
             self._eval_stop_event.wait(EVAL_INTERVAL_SECS)
 
-    def _evaluate_all_symbols(self, run_id: int) -> None:
+    def _print_eval_console_heartbeat(self, processed_symbols: list[str], new_hits: int) -> None:
+        ts = datetime.now(IST_ZONE).strftime("%H:%M:%S")
+        total = len(processed_symbols)
+        with self._lock:
+            ws_total = int(self._ws_msg_count)
+            ws_prev = int(self._ws_msg_count_last_heartbeat)
+            self._ws_msg_count_last_heartbeat = ws_total
+            ws_symbol_total = int(self._ws_symbol_msg_count)
+            ws_symbol_prev = int(self._ws_symbol_msg_count_last_heartbeat)
+            self._ws_symbol_msg_count_last_heartbeat = ws_symbol_total
+            ws_nonsymbol_total = int(self._ws_nonsymbol_msg_count)
+            ws_nonsymbol_prev = int(self._ws_nonsymbol_msg_count_last_heartbeat)
+            self._ws_nonsymbol_msg_count_last_heartbeat = ws_nonsymbol_total
+            ws_last = dict(self._ws_last_message_summary) if self._ws_last_message_summary else {}
+            ws_raw = dict(self._ws_last_raw_message) if self._ws_last_raw_message else {}
+            ws_raw_at = self._ws_last_raw_received_at
+        ws_delta = ws_total - ws_prev
+        ws_symbol_delta = ws_symbol_total - ws_symbol_prev
+        ws_nonsymbol_delta = ws_nonsymbol_total - ws_nonsymbol_prev
+        if ws_last:
+            ws_tail = (
+                f"last_symbol={ws_last.get('symbol', '-')}, "
+                f"ltp={ws_last.get('ltp', '-')}, "
+                f"vtt={ws_last.get('vol_traded_today', '-')}, "
+                f"ts={ws_last.get('exch_time', '-')}, "
+                f"kind={ws_last.get('kind', '-')}, "
+                f"info={ws_last.get('info', '-')}"
+            )
+        else:
+            ws_tail = "last_symbol=-, ltp=-, vtt=-, ts=-, kind=-, info=-"
+        print(
+            f"[WS {ts}] ticks/sec={ws_delta}, symbol_ticks/sec={ws_symbol_delta}, "
+            f"control_ticks/sec={ws_nonsymbol_delta}, total_ticks={ws_total}, {ws_tail}"
+        )
+        if DEBUG_PRINT_WS_FEED_EVERY_SEC:
+            if ws_raw:
+                try:
+                    raw_txt = json.dumps(ws_raw, ensure_ascii=False)
+                except Exception:  # noqa: BLE001
+                    raw_txt = str(ws_raw)
+                if len(raw_txt) > WS_FEED_PRINT_MAX_CHARS:
+                    raw_txt = raw_txt[:WS_FEED_PRINT_MAX_CHARS] + "...<truncated>"
+                print(f"[WS FEED {ts}] received_at={ws_raw_at} payload={raw_txt}")
+            else:
+                print(f"[WS FEED {ts}] received_at=-- payload=<none>")
+        if total == 0:
+            print(f"[EVAL {ts}] processed=0 (waiting for websocket ticks / baselines), new_hits={new_hits}")
+            return
+        preview_n = min(15, total)
+        preview = ", ".join(processed_symbols[:preview_n])
+        suffix = " ..." if total > preview_n else ""
+        print(f"[EVAL {ts}] processed={total}, new_hits={new_hits}, symbols=[{preview}{suffix}]")
+
+    def _ws_exchange_lag_vs_wall_seconds(self) -> float | None:
+        """Seconds between wall clock and last symbol tick's exch_feed_time / last_traded_time epoch."""
+        with self._lock:
+            ep = self._ws_last_symbol_feed_epoch
+        if ep is None:
+            return None
+        try:
+            return max(0.0, time.time() - float(ep))
+        except (TypeError, ValueError):
+            return None
+
+    def _watch_websocket_health(self, run_id: int) -> None:
         if not self._is_active(run_id):
             return
+        now = time.monotonic()
+        with self._lock:
+            last = float(self._last_ws_msg_monotonic or 0.0)
+            can_log = now - float(self._last_ws_health_log_monotonic or 0.0) >= 30.0
+            has_symbols = bool(self._subscribed_symbols)
+            ws = self._ws_client
+        if not has_symbols or ws is None:
+            return
+        if not self._is_market_hours_ist():
+            return
+        if last <= 0:
+            if can_log:
+                with self._lock:
+                    self._last_ws_health_log_monotonic = now
+                self._push_event("No websocket tick received yet after subscribe (market hours).")
+            return
+        stale_secs = now - last
+        if stale_secs < 20.0:
+            return
+        lag_wall = self._ws_exchange_lag_vs_wall_seconds()
+        if lag_wall is not None and lag_wall > WS_EXCHANGE_TIME_STALE_SKIP_RESUB_SEC:
+            with self._lock:
+                last_notice = float(self._last_ws_stale_feed_notice_monotonic or 0.0)
+            if now - last_notice >= WS_STALE_FEED_NOTICE_INTERVAL_SEC:
+                with self._lock:
+                    self._last_ws_stale_feed_notice_monotonic = now
+                self._push_event(
+                    f"Websocket quiet ~{int(stale_secs)}s but last quote is ~{int(lag_wall)}s behind "
+                    "wall clock vs exchange time — skipping resubscribe (no live tape / snapshot only)."
+                )
+            return
+        if not can_log:
+            return
+        last_resub = float(self._last_ws_resubscribe_monotonic or 0.0)
+        if last_resub > 0 and (now - last_resub) < WS_RESUBSCRIBE_COOLDOWN_SEC:
+            with self._lock:
+                self._last_ws_health_log_monotonic = now
+            return
+        with self._lock:
+            self._last_ws_health_log_monotonic = now
+            symbols = list(self._subscribed_symbols)
+        self._last_ws_resubscribe_monotonic = now
+        self._push_event(
+            f"No websocket tick for {int(stale_secs)}s; re-subscribing {len(symbols)} symbols "
+            "(unsubscribe first so FYERS SDK does not accumulate past 5000)."
+        )
+        try:
+            ws.unsubscribe(symbols=symbols, data_type=WS_SYMBOL_DATA_TYPE)
+        except Exception as exc:  # noqa: BLE001
+            self._push_event(f"Websocket unsubscribe before resubscribe failed (continuing): {exc}")
+        time.sleep(WS_RESUBSCRIBE_SETTLE_SEC)
+        try:
+            ws.subscribe(symbols=symbols, data_type=WS_SYMBOL_DATA_TYPE)
+        except Exception as exc:  # noqa: BLE001
+            self._push_event(f"Websocket re-subscribe failed: {exc}")
+
+    def _is_market_hours_ist(self) -> bool:
+        now_ist = datetime.now(IST_ZONE)
+        minute = now_ist.hour * 60 + now_ist.minute
+        start = AUTO_WS_START_HOUR_IST * 60 + AUTO_WS_START_MINUTE_IST
+        end = 15 * 60 + 31
+        return start <= minute <= end
+
+    def _evaluate_all_symbols(self, run_id: int) -> tuple[list[str], int]:
+        processed_symbols: list[str] = []
+        new_hits = 0
+        if not self._is_active(run_id):
+            return processed_symbols, new_hits
         with self._lock:
             if not self._scan_ready_from_next_minute:
-                return
+                return processed_symbols, new_hits
             self._ensure_shortlist_session_locked()
             rule1_mult = float(self._scan_config.get("rule1_volume_multiplier", 30))
             rule1_value_cr = float(self._scan_config.get("rule1_value_cr", 4))
-            rule2_mult = float(self._scan_config.get("rule2_volume_multiplier", 10))
-            rule2_value_cr = float(self._scan_config.get("rule2_value_cr", 8))
             symbols = list(self._baseline_by_symbol.keys())
 
         for symbol in symbols:
             if not self._is_active(run_id) or self._eval_stop_event.is_set():
-                return
+                return processed_symbols, new_hits
             with self._lock:
                 base = self._baseline_by_symbol.get(symbol)
                 tick = self._last_tick_by_symbol.get(symbol)
@@ -868,6 +1139,7 @@ class ScannerEngine:
                     vtt_f = None
                 if vtt_f is None:
                     continue
+                processed_symbols.append(symbol)
                 diff = max(vtt_f - float(baseline_vtt), 0.0)
                 try:
                     ltp = float(tick.get("ltp"))
@@ -889,18 +1161,12 @@ class ScannerEngine:
 
             value_rupees = diff * ltp
             condition1 = diff > (rule1_mult * sma_value) and value_rupees > (rule1_value_cr * 1e7)
-            condition2 = diff > (rule2_mult * sma_value) and value_rupees > (rule2_value_cr * 1e7)
-            matched = ""
-            if condition1:
-                matched = "C1"
-            elif condition2:
-                matched = "C2"
 
             with self._lock:
                 if not self._is_active(run_id):
-                    return
+                    return processed_symbols, new_hits
                 prev = self._last_qual_true.get(symbol, False)
-                if matched:
+                if condition1:
                     if not prev:
                         self._symbol_today_hits[symbol] = self._symbol_today_hits.get(symbol, 0) + 1
                         hit_n = self._symbol_today_hits[symbol]
@@ -917,7 +1183,7 @@ class ScannerEngine:
                             "metric_source": "vol_traded_today_delta",
                             "relative_vol": round(relative_vol, 2),
                             "trade_value_cr": round(value_rupees / 1e7, 3),
-                            "condition": matched,
+                            "condition": "C1",
                             "hits": hit_n,
                             "symbol_repeat": hit_n > 1,
                         }
@@ -926,18 +1192,19 @@ class ScannerEngine:
                             self._shortlist_events = self._shortlist_events[-SHORTLIST_MAX_EVENTS:]
                         self._persist_shortlist_state_nolock()
                         self._push_event(
-                            f"SHORTLISTED {symbol} via {matched} "
+                            f"SHORTLISTED {symbol} via C1 "
                             f"(vtt_diff={diff:.0f}, rel_vol={relative_vol:.2f}x, "
                             f"trade_value={value_rupees/1e7:.2f} Cr, day_hit={hit_n})"
                         )
+                        new_hits += 1
                     self._last_qual_true[symbol] = True
                 else:
                     self._last_qual_true[symbol] = False
+        return processed_symbols, new_hits
 
     def _start_websocket(self, access_token: str, symbols: list[str], run_id: int) -> None:
         global data_socket
-        self._disconnect_ws()
-        self._close_stale_process()
+        self._close_all_websockets_before_subscribe()
         WS_STATE_PATH.write_text(json.dumps({"pid": os.getpid()}), encoding="utf-8")
         latency_stats = {
             "window_start": time.perf_counter(),
@@ -950,9 +1217,54 @@ class ScannerEngine:
         def on_message(message: dict[str, Any]) -> None:
             if not self._is_active(run_id):
                 return
+            if not isinstance(message, dict):
+                return
+            self._ws_last_raw_message = dict(message)
+            self._ws_last_raw_received_at = datetime.now(IST_ZONE).strftime("%Y-%m-%d %H:%M:%S")
+            if DEBUG_PRINT_WS_RAW_MESSAGES:
+                now_sec = int(time.time())
+                if now_sec != self._ws_raw_log_window_sec:
+                    self._ws_raw_log_window_sec = now_sec
+                    self._ws_raw_log_count = 0
+                if self._ws_raw_log_count < WS_RAW_MAX_PRINTS_PER_SEC:
+                    try:
+                        print(f"[WS RAW] {json.dumps(message, ensure_ascii=False)}")
+                    except Exception:
+                        print(f"[WS RAW] {message}")
+                    self._ws_raw_log_count += 1
+                elif self._ws_raw_log_count == WS_RAW_MAX_PRINTS_PER_SEC:
+                    print(
+                        f"[WS RAW] throttled: showing first {WS_RAW_MAX_PRINTS_PER_SEC} "
+                        "messages/sec only"
+                    )
+                    self._ws_raw_log_count += 1
             t0 = time.perf_counter()
             self._ws_msg_count += 1
+            self._last_ws_msg_monotonic = time.monotonic()
+            symbol = message.get("symbol") or message.get("Symbol")
             raw_ts = message.get("exch_feed_time") or message.get("last_traded_time")
+            if symbol and raw_ts is not None:
+                try:
+                    self._ws_last_symbol_feed_epoch = float(raw_ts)
+                except (TypeError, ValueError):
+                    pass
+            if symbol:
+                self._ws_symbol_msg_count += 1
+                kind = "symbol_tick"
+                info = "ok"
+            else:
+                self._ws_nonsymbol_msg_count += 1
+                kind = "control_or_ack"
+                keys_preview = ",".join(list(message.keys())[:6]) if isinstance(message, dict) else "-"
+                info = f"keys={keys_preview}"
+            self._ws_last_message_summary = {
+                "symbol": symbol,
+                "ltp": message.get("ltp"),
+                "vol_traded_today": message.get("vol_traded_today"),
+                "exch_time": self._to_ist_second_str(raw_ts),
+                "kind": kind,
+                "info": info,
+            }
             self._apply_scanner_rules(message)
             t1 = time.perf_counter()
 
@@ -997,6 +1309,10 @@ class ScannerEngine:
         def on_error(message: Any) -> None:
             if not self._is_active(run_id):
                 return
+            try:
+                self._push_event(f"Websocket on_error payload: {json.dumps(message, ensure_ascii=False)[:500]}")
+            except Exception:
+                self._push_event(f"Websocket on_error payload: {str(message)[:500]}")
             text = str(message or "")
             lower = text.lower()
             # Treat transport hiccups as transient so SDK reconnect can recover.
@@ -1022,16 +1338,34 @@ class ScannerEngine:
             self._eval_stop_event.clear()
             self._eval_run_id = run_id
             self._startup_minute_key = datetime.now(IST_ZONE).strftime("%Y-%m-%d %H:%M")
-            self._scan_ready_from_next_minute = False
+            self._scan_ready_from_next_minute = True
             self._set_message(
-                f"Websocket live. Waiting for next minute after {self._startup_minute_key}...",
+                f"Websocket live. Scanner active immediately (started at {self._startup_minute_key}).",
                 run_id,
             )
-            batch_size = 200
-            for start in range(0, len(symbols), batch_size):
-                batch = symbols[start : start + batch_size]
-                self._ws_client.subscribe(symbols=batch, data_type="SymbolUpdate")
-            self._ws_client.keep_running()
+            self._subscribed_symbols = dedupe_symbols_preserve_order(symbols)
+            self._last_ws_msg_monotonic = time.monotonic()
+            self._last_ws_health_log_monotonic = 0.0
+            self._ws_last_symbol_feed_epoch = None
+            # Single subscribe call; SDK chunks internally and this reduces token API pressure.
+            self._ws_client.subscribe(
+                symbols=self._subscribed_symbols, data_type=WS_SYMBOL_DATA_TYPE
+            )
+            self._push_event(
+                f"Single subscribe call sent for {len(self._subscribed_symbols)} symbols "
+                f"(data_type={WS_SYMBOL_DATA_TYPE})."
+            )
+            if DEBUG_PRINT_SUBSCRIBED_SYMBOLS:
+                total = len(self._subscribed_symbols)
+                preview_n = min(WS_SUBSCRIBE_SYMBOLS_PREVIEW_COUNT, total)
+                preview = ", ".join(self._subscribed_symbols[:preview_n])
+                suffix = "" if total <= preview_n else f", ... (+{total - preview_n} more)"
+                print(f"[WS SUBSCRIBE LIST] total={total} [{preview}{suffix}]")
+            mapped_tokens = len(getattr(self._ws_client, "symbol_token", {}) or {})
+            self._push_event(
+                f"Websocket subscribe status: requested={len(self._subscribed_symbols)}, "
+                f"mapped_tokens={mapped_tokens}"
+            )
             self._eval_thread = threading.Thread(
                 target=self._evaluation_loop,
                 args=(run_id,),
@@ -1039,6 +1373,10 @@ class ScannerEngine:
                 daemon=True,
             )
             self._eval_thread.start()
+            try:
+                self._ws_client.keep_running()
+            except Exception:
+                pass
 
         self._ws_client = data_ws.FyersDataSocket(
             access_token=access_token,
@@ -1053,10 +1391,25 @@ class ScannerEngine:
         )
         data_socket = self._ws_client
         self._ws_client.connect()
+        # SDK connect() sleeps then runs on_connect (subscribe). Wait until internal ws exists.
+        ws_ready_deadline = time.monotonic() + 45.0
+        while time.monotonic() < ws_ready_deadline and self._is_active(run_id):
+            try:
+                if self._ws_client.is_connected():
+                    break
+            except Exception:
+                pass
+            time.sleep(0.15)
+        else:
+            if self._is_active(run_id):
+                self._push_event(
+                    "Websocket connect finished but is_connected() is still false — "
+                    "check fyersDataSocket.log; market may be closed (no tape)."
+                )
 
     def _apply_scanner_rules(self, message: dict[str, Any]) -> None:
         """Ingest websocket tick: update VTT baseline per IST minute and cache last tick."""
-        symbol = str(message.get("symbol") or "").strip()
+        symbol = str(message.get("symbol") or message.get("Symbol") or "").strip()
         if not symbol:
             return
 
