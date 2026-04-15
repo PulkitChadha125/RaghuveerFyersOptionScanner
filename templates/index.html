@@ -143,6 +143,7 @@
                 <form method="post" id="settings-form-fields">
                     <input type="hidden" name="action" value="save_settings">
                     <input type="hidden" name="metric_source" value="vol_traded_today_delta">
+                    <div class="settings-rule-title">Rule 1</div>
                     <div class="settings-criteria-row">
                         <label for="rule1_value_cr">Value &gt;</label>
                         <input type="number" min="1" id="rule1_value_cr" name="rule1_value_cr" value="{{ settings.rule1_value_cr }}" required>
@@ -156,10 +157,26 @@
                         <label for="sma_period">SMA Period</label>
                         <input type="number" min="1" id="sma_period" name="rule1_sma_period" value="{{ settings.rule1_sma_period }}" required>
                     </div>
-                    <div class="settings-criteria-row settings-criteria-note">
-                        <label>Rule 2</label>
-                        <input type="text" value="Volume > SMA x 10" readonly>
-                        <span class="criteria-suffix">Value = 6 Cr</span>
+                    <div class="settings-rule-title">Rule 2</div>
+                    <div class="settings-criteria-row">
+                        <label for="rule2_value_cr">Value &gt;</label>
+                        <input type="number" min="1" id="rule2_value_cr" name="rule2_value_cr" value="{{ settings.rule2_value_cr }}" required>
+                        <span class="criteria-suffix">Cr</span>
+                    </div>
+                    <div class="settings-criteria-row">
+                        <label for="rule2_vol">Volume &gt; SMA x</label>
+                        <input type="number" min="1" id="rule2_vol" name="rule2_volume_multiplier" value="{{ settings.rule2_volume_multiplier }}" required>
+                    </div>
+                    <div class="settings-criteria-row">
+                        <label for="rule2_sma_period_display">SMA Period</label>
+                        <input
+                            type="number"
+                            min="1"
+                            id="rule2_sma_period_display"
+                            value="{{ settings.rule1_sma_period }}"
+                            readonly
+                            aria-readonly="true"
+                        >
                     </div>
                     <div class="modal-actions" style="border-top:none;padding-top:12px;margin-top:8px;">
                         <button type="button" class="btn-secondary" id="close-settings-2">Close</button>

@@ -538,13 +538,19 @@ tr.scanner-row-repeat:hover td {
     color: var(--brown-800);
 }
 
-.settings-criteria-row input[readonly] {
-    background: var(--cream);
+.settings-rule-title {
+    margin: 4px 0 10px;
+    font-size: 0.82rem;
+    font-weight: 800;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
     color: var(--brown-800);
+    padding-top: 6px;
 }
 
-.settings-criteria-row.settings-criteria-note input[readonly] {
-    width: 170px;
+.settings-rule-title:not(:first-of-type) {
+    margin-top: 14px;
+    border-top: 1px solid var(--brown-200);
 }
 
 .trade-panel {

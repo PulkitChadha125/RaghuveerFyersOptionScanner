@@ -125,9 +125,12 @@ def home():
         RUNTIME_SETTINGS["rule1_value_cr"] = parse_int(
             "rule1_value_cr", RUNTIME_SETTINGS["rule1_value_cr"]
         )
-        # Rule 2 is fixed per strategy request.
-        RUNTIME_SETTINGS["rule2_volume_multiplier"] = 10
-        RUNTIME_SETTINGS["rule2_value_cr"] = 6
+        RUNTIME_SETTINGS["rule2_volume_multiplier"] = parse_int(
+            "rule2_volume_multiplier", RUNTIME_SETTINGS["rule2_volume_multiplier"]
+        )
+        RUNTIME_SETTINGS["rule2_value_cr"] = parse_int(
+            "rule2_value_cr", RUNTIME_SETTINGS["rule2_value_cr"]
+        )
         RUNTIME_SETTINGS["metric_source"] = request.form.get(
             "metric_source", RUNTIME_SETTINGS["metric_source"]
         )
