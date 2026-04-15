@@ -196,6 +196,14 @@ a:hover { color: var(--accent); }
     border: 1px solid var(--border);
     border-radius: var(--radius-sm);
     margin-bottom: 14px;
+    line-height: 1.45;
+}
+
+.info-banner-sub {
+    display: inline-block;
+    margin-top: 0.2rem;
+    font-size: 0.74rem;
+    opacity: 0.92;
 }
 
 /* ——— Status cards ——— */
@@ -389,6 +397,21 @@ tr.scanner-row-repeat:hover td {
 }
 .inline-form { margin: 0; display: inline; }
 
+.trade-btn {
+    border: none;
+    border-radius: 8px;
+    padding: 7px 12px;
+    font-size: 0.76rem;
+    font-weight: 700;
+    cursor: pointer;
+    color: #fff;
+    font-family: inherit;
+}
+.trade-btn.buy { background: var(--start); }
+.trade-btn.buy:hover { background: var(--start-hover); }
+.trade-btn.sell { background: var(--stop); }
+.trade-btn.sell:hover { background: var(--stop-hover); }
+
 /* ——— Activity log ——— */
 .activity-block {
     margin-top: 14px;
@@ -498,7 +521,7 @@ tr.scanner-row-repeat:hover td {
     min-width: 115px;
     font-size: 1.02rem;
     font-weight: 600;
-    color: #f2f6ff;
+    color: var(--brown-900);
 }
 
 .settings-criteria-row input[type="number"] {
@@ -512,7 +535,20 @@ tr.scanner-row-repeat:hover td {
 
 .settings-criteria-row .criteria-suffix {
     font-size: 1.02rem;
-    color: #f2f6ff;
+    color: var(--brown-800);
+}
+
+.settings-criteria-row input[readonly] {
+    background: var(--cream);
+    color: var(--brown-800);
+}
+
+.settings-criteria-row.settings-criteria-note input[readonly] {
+    width: 170px;
+}
+
+.trade-panel {
+    max-width: 460px;
 }
 
 .form-field {

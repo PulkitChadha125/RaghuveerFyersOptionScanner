@@ -35,37 +35,6 @@
             </div>
         </div>
 
-        <p class="info-banner">
-            Open this URL from another device on the same network: <strong id="lan-hint-host">—</strong>
-            (use your machine’s LAN IP and port if not localhost).
-        </p>
-
-        <section class="status-cards">
-            <div class="status-card">
-                <div class="status-card-label">Universe symbols</div>
-                <div class="status-card-value" id="stat-universe">{{ universe_total }}</div>
-                <div class="status-card-sub">From NSE_EQ symbol CSV</div>
-            </div>
-            <div class="status-card">
-                <div class="status-card-label">Baselines loaded</div>
-                <div class="status-card-value" id="stat-baseline">{{ baseline_loaded_count }}</div>
-                <div class="status-card-sub">After history bootstrap</div>
-            </div>
-            <div class="status-card">
-                <div class="status-card-label">Last action</div>
-                <div class="status-card-value" style="font-size:1rem;font-weight:600;" id="stat-message">{{ engine_status.last_message or "Idle" }}</div>
-                {% if engine_status.last_error %}
-                <div class="status-card-sub" style="color:var(--stop);">{{ engine_status.last_error }}</div>
-                {% endif %}
-            </div>
-        </section>
-
-        <div class="scanner-toolbar" style="margin-bottom:12px;">
-            <span style="font-size:0.78rem;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:0.05em;margin-right:8px;">View</span>
-            <button type="button" class="toolbar-btn toolbar-btn-settings" id="filter-all" style="padding:8px 14px;background:var(--brown-700);">All hits</button>
-            <button type="button" class="toolbar-btn toolbar-btn-settings" id="filter-watch" style="padding:8px 14px;opacity:0.85;">Watchlist only</button>
-        </div>
-
         <div class="scanner-main-grid scanner-main-single" id="main-grid">
             <div class="panel-block">
                 <div class="panel-block-header scanner-panel-head">
@@ -90,6 +59,8 @@
                                 <th>LTP %</th>
                                 <th>Value (Cr)</th>
                                 <th>Rule</th>
+                                <th>Buy</th>
+                                <th>Sell</th>
                                 <th>★</th>
                             </tr>
                         </thead>
@@ -107,6 +78,12 @@
                                     <td>{{ stock.trade_value_cr }}</td>
                                     <td>{{ stock.condition }}</td>
                                     <td>
+                                        <button type="button" class="trade-btn buy" data-side="BUY" data-symbol="{{ stock.symbol }}" data-ltp="{{ stock.ltp }}">Buy</button>
+                                    </td>
+                                    <td>
+                                        <button type="button" class="trade-btn sell" data-side="SELL" data-symbol="{{ stock.symbol }}" data-ltp="{{ stock.ltp }}">Sell</button>
+                                    </td>
+                                    <td>
                                         {% if stock.symbol in watchlist %}
                                             <button class="watch-icon-btn saved" type="button" title="In watchlist" aria-label="In watchlist">★</button>
                                         {% else %}
@@ -121,7 +98,7 @@
                                 {% endfor %}
                             {% else %}
                                 <tr>
-                                    <td colspan="10" class="empty-row">No hits yet. Start the scanner and wait for rules to match.</td>
+                                    <td colspan="12" class="empty-row">No hits yet. Start the scanner and wait for rules to match.</td>
                                 </tr>
                             {% endif %}
                         </tbody>
@@ -130,17 +107,30 @@
             </div>
         </div>
 
-        <details class="activity-block" open>
-            <summary>Activity log</summary>
-            <p class="engine-status-line" id="engine-status-text">
-                {{ engine_status.last_message }}{% if engine_status.last_error %} — {{ engine_status.last_error }}{% endif %}
-            </p>
-            <div class="event-log-inner" id="event-log">
-                {% for event in engine_events %}
-                <div class="event-line">{{ event }}</div>
-                {% endfor %}
+        <section class="panel-block" style="margin-top:12px;">
+            <div class="panel-block-header">Net positions</div>
+            <div class="scanner-table-wrap" style="max-height:min(30vh,320px);">
+                <table class="data-table">
+                    <thead>
+                        <tr>
+                            <th>Symbol</th>
+                            <th>Qty</th>
+                            <th>Side</th>
+                            <th>Realized PnL</th>
+                            <th>Unrealized PnL</th>
+                            <th>LTP</th>
+                            <th>Action</th>
+                        </tr>
+                    </thead>
+                    <tbody id="net-positions-body">
+                        <tr>
+                            <td colspan="7" class="empty-row">No open net positions.</td>
+                        </tr>
+                    </tbody>
+                </table>
             </div>
-        </details>
+        </section>
+
     </div>
 
     <div class="modal-backdrop" id="settings-modal" role="dialog" aria-modal="true" aria-labelledby="settings-modal-title">
@@ -165,6 +155,11 @@
                     <div class="settings-criteria-row">
                         <label for="sma_period">SMA Period</label>
                         <input type="number" min="1" id="sma_period" name="rule1_sma_period" value="{{ settings.rule1_sma_period }}" required>
+                    </div>
+                    <div class="settings-criteria-row settings-criteria-note">
+                        <label>Rule 2</label>
+                        <input type="text" value="Volume > SMA x 10" readonly>
+                        <span class="criteria-suffix">Value = 6 Cr</span>
                     </div>
                     <div class="modal-actions" style="border-top:none;padding-top:12px;margin-top:8px;">
                         <button type="button" class="btn-secondary" id="close-settings-2">Close</button>
@@ -197,6 +192,39 @@
         </div>
     </div>
 
+    <div class="modal-backdrop" id="trade-modal" role="dialog" aria-modal="true" aria-labelledby="trade-modal-title">
+        <div class="modal-panel trade-panel">
+            <div class="modal-head">
+                <h2 id="trade-modal-title">Place Limit Order</h2>
+                <button type="button" class="modal-close" id="close-trade" aria-label="Close">&times;</button>
+            </div>
+            <div class="modal-body">
+                <p class="modal-hint" id="trade-modal-hint">Symbol: -- · Side: -- · Latest LTP: --</p>
+                <form id="trade-form">
+                    <div class="settings-criteria-row">
+                        <label for="trade-target-pct">Target %</label>
+                        <input type="number" min="0" step="0.01" id="trade-target-pct" value="1.00" required>
+                        <span class="criteria-suffix">%</span>
+                    </div>
+                    <div class="settings-criteria-row">
+                        <label for="trade-stop-pct">Stop-loss %</label>
+                        <input type="number" min="0" step="0.01" id="trade-stop-pct" value="0.50" required>
+                        <span class="criteria-suffix">%</span>
+                    </div>
+                    <div class="settings-criteria-row">
+                        <label for="trade-qty">Quantity</label>
+                        <input type="number" min="1" step="1" id="trade-qty" value="1" required>
+                    </div>
+                    <div class="modal-actions" style="border-top:none;padding-top:12px;margin-top:8px;">
+                        <button type="button" class="btn-secondary" id="close-trade-2">Close</button>
+                        <button type="submit" class="btn-primary" id="submit-trade">Place Limit Order</button>
+                    </div>
+                </form>
+                <p class="modal-hint" id="trade-result" style="margin-top:8px;"></p>
+            </div>
+        </div>
+    </div>
+
     <script>
         const symbolSearchInput = document.getElementById("symbol-search-input");
         const symbolSearchBtn = document.getElementById("symbol-search-btn");
@@ -205,25 +233,23 @@
 
         const livePill = document.getElementById("live-pill");
         const livePillText = document.getElementById("live-pill-text");
-        const statUniverse = document.getElementById("stat-universe");
-        const statBaseline = document.getElementById("stat-baseline");
-        const statMessage = document.getElementById("stat-message");
         const tableBody = document.getElementById("scanner-table-body");
-        const engineStatusText = document.getElementById("engine-status-text");
-        const eventLog = document.getElementById("event-log");
         const settingsModal = document.getElementById("settings-modal");
         const openSettings = document.getElementById("open-settings");
         const closeSettings = document.getElementById("close-settings");
         const closeSettings2 = document.getElementById("close-settings-2");
-        const filterAll = document.getElementById("filter-all");
-        const filterWatch = document.getElementById("filter-watch");
-
-        try {
-            const host = window.location.hostname;
-            const port = window.location.port || (window.location.protocol === "https:" ? "443" : "80");
-            const el = document.getElementById("lan-hint-host");
-            if (el) el.textContent = host + (port && port !== "80" && port !== "443" ? ":" + port : "");
-        } catch (_) {}
+        const tradeModal = document.getElementById("trade-modal");
+        const closeTrade = document.getElementById("close-trade");
+        const closeTrade2 = document.getElementById("close-trade-2");
+        const tradeHint = document.getElementById("trade-modal-hint");
+        const tradeResult = document.getElementById("trade-result");
+        const tradeForm = document.getElementById("trade-form");
+        const tradeTarget = document.getElementById("trade-target-pct");
+        const tradeStop = document.getElementById("trade-stop-pct");
+        const tradeQty = document.getElementById("trade-qty");
+        const tradeSubmit = document.getElementById("submit-trade");
+        const netPositionsBody = document.getElementById("net-positions-body");
+        const activeTrade = { symbol: "", side: "", ltp: null };
 
         const applyScannerSymbolFilter = () => {
             if (!tableBody) return;
@@ -254,33 +280,27 @@
             localStorage.setItem(symbolSearchStorageKey, symbolSearchInput?.value || "");
         });
 
-        let viewMode = "all";
-        const setFilterUi = () => {
-            if (!filterAll || !filterWatch) return;
-            const allOn = viewMode === "all";
-            filterAll.style.opacity = allOn ? "1" : "0.75";
-            filterWatch.style.opacity = allOn ? "0.75" : "1";
-            filterAll.style.outline = allOn ? "2px solid var(--accent)" : "none";
-            filterWatch.style.outline = !allOn ? "2px solid var(--accent)" : "none";
-        };
-        filterAll?.addEventListener("click", () => { viewMode = "all"; setFilterUi(); pollDashboardData(); });
-        filterWatch?.addEventListener("click", () => { viewMode = "watchlist"; setFilterUi(); pollDashboardData(); });
-        setFilterUi();
+        const openSettingsModal = () => settingsModal?.classList.add("open");
+        const closeSettingsModal = () => settingsModal?.classList.remove("open");
+        const openTradeModal = () => tradeModal?.classList.add("open");
+        const closeTradeModal = () => tradeModal?.classList.remove("open");
 
-        const openModal = () => {
-            settingsModal?.classList.add("open");
-        };
-        const closeModal = () => {
-            settingsModal?.classList.remove("open");
-        };
-        openSettings?.addEventListener("click", openModal);
-        closeSettings?.addEventListener("click", closeModal);
-        closeSettings2?.addEventListener("click", closeModal);
+        openSettings?.addEventListener("click", openSettingsModal);
+        closeSettings?.addEventListener("click", closeSettingsModal);
+        closeSettings2?.addEventListener("click", closeSettingsModal);
+        closeTrade?.addEventListener("click", closeTradeModal);
+        closeTrade2?.addEventListener("click", closeTradeModal);
         settingsModal?.addEventListener("click", (e) => {
-            if (e.target === settingsModal) closeModal();
+            if (e.target === settingsModal) closeSettingsModal();
+        });
+        tradeModal?.addEventListener("click", (e) => {
+            if (e.target === tradeModal) closeTradeModal();
         });
         document.addEventListener("keydown", (e) => {
-            if (e.key === "Escape") closeModal();
+            if (e.key === "Escape") {
+                closeSettingsModal();
+                closeTradeModal();
+            }
         });
 
         const buildWatchButton = (stock, watchlistSet) => {
@@ -294,17 +314,15 @@
             </form>`;
         };
 
-        const filterRows = (rows, watchlist, mode) => {
-            if (mode !== "watchlist") return rows || [];
-            if (!watchlist || watchlist.length === 0) return [];
-            const w = new Set(watchlist);
-            return (rows || []).filter((r) => w.has(r.symbol));
+        const buildTradeButton = (stock, side) => {
+            const sideClass = side === "BUY" ? "buy" : "sell";
+            return `<button type="button" class="trade-btn ${sideClass}" data-side="${side}" data-symbol="${String(stock.symbol || "").replace(/"/g, "&quot;")}" data-ltp="${stock.ltp ?? ""}">${side === "BUY" ? "Buy" : "Sell"}</button>`;
         };
 
         const renderScannerRows = (rows, watchlist, emptyText) => {
             if (!tableBody) return;
             if (!rows || rows.length === 0) {
-                tableBody.innerHTML = `<tr><td colspan="10" class="empty-row">${emptyText}</td></tr>`;
+                tableBody.innerHTML = `<tr><td colspan="12" class="empty-row">${emptyText}</td></tr>`;
                 return;
             }
             const wl = new Set(watchlist || []);
@@ -319,26 +337,142 @@
                     <td>${stock.change_pct ?? "-"}</td>
                     <td>${stock.trade_value_cr ?? "-"}</td>
                     <td>${stock.condition ?? "-"}</td>
+                    <td>${buildTradeButton(stock, "BUY")}</td>
+                    <td>${buildTradeButton(stock, "SELL")}</td>
                     <td>${buildWatchButton(stock, wl)}</td>
                 </tr>
             `).join("");
         };
+
+        const fmtMoney = (v) => {
+            const n = Number(v);
+            if (!Number.isFinite(n)) return "-";
+            return n.toLocaleString("en-IN", { maximumFractionDigits: 2 });
+        };
+
+        const renderNetPositions = (rows) => {
+            if (!netPositionsBody) return;
+            if (!rows || rows.length === 0) {
+                netPositionsBody.innerHTML = '<tr><td colspan="7" class="empty-row">No open net positions.</td></tr>';
+                return;
+            }
+            netPositionsBody.innerHTML = rows.map((p) => `
+                <tr data-pos-symbol="${String(p.symbol || "").toLowerCase()}">
+                    <td>${p.symbol ?? "-"}</td>
+                    <td>${p.net_qty ?? 0}</td>
+                    <td>${p.side ?? "-"}</td>
+                    <td>${fmtMoney(p.realized_pnl)}</td>
+                    <td>${fmtMoney(p.unrealized_pnl)}</td>
+                    <td>${fmtMoney(p.ltp)}</td>
+                    <td>
+                        <button type="button" class="trade-btn sell exit-pos-btn" data-symbol="${String(p.symbol || "").replace(/"/g, "&quot;")}" ${Number(p.net_qty || 0) === 0 ? "disabled" : ""}>Exit</button>
+                    </td>
+                </tr>
+            `).join("");
+        };
+
+        const fillTradeHint = () => {
+            if (!tradeHint) return;
+            const ltpText = activeTrade.ltp == null ? "--" : Number(activeTrade.ltp).toFixed(2);
+            tradeHint.textContent = `Symbol: ${activeTrade.symbol || "--"} · Side: ${activeTrade.side || "--"} · Latest LTP: ${ltpText}`;
+        };
+
+        tableBody?.addEventListener("click", (e) => {
+            const btn = e.target.closest("button.trade-btn");
+            if (!btn) return;
+            activeTrade.symbol = String(btn.dataset.symbol || "");
+            activeTrade.side = String(btn.dataset.side || "").toUpperCase();
+            const ltpNum = Number(btn.dataset.ltp);
+            activeTrade.ltp = Number.isFinite(ltpNum) ? ltpNum : null;
+            if (tradeResult) {
+                tradeResult.textContent = "";
+                tradeResult.style.color = "var(--muted)";
+            }
+            fillTradeHint();
+            openTradeModal();
+        });
+
+        netPositionsBody?.addEventListener("click", async (e) => {
+            const btn = e.target.closest("button.exit-pos-btn");
+            if (!btn) return;
+            const symbol = String(btn.dataset.symbol || "");
+            if (!symbol) return;
+            btn.disabled = true;
+            const oldText = btn.textContent;
+            btn.textContent = "Exiting...";
+            try {
+                const resp = await fetch("/api/exit-position", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ symbol }),
+                });
+                const data = await resp.json();
+                if (!resp.ok || !data.ok) {
+                    throw new Error(data.error || "exit failed");
+                }
+            } catch (err) {
+                alert(String(err?.message || err || "exit failed"));
+            } finally {
+                btn.textContent = oldText || "Exit";
+                btn.disabled = false;
+                pollDashboardData();
+            }
+        });
+
+        tradeForm?.addEventListener("submit", async (e) => {
+            e.preventDefault();
+            if (!activeTrade.symbol || !activeTrade.side) return;
+            const payload = {
+                symbol: activeTrade.symbol,
+                side: activeTrade.side,
+                quantity: Number(tradeQty?.value || 1),
+                target_pct: Number(tradeTarget?.value || 0),
+                stop_loss_pct: Number(tradeStop?.value || 0),
+            };
+            if (tradeSubmit) tradeSubmit.disabled = true;
+            if (tradeResult) {
+                tradeResult.style.color = "var(--muted)";
+                tradeResult.textContent = "Placing order...";
+            }
+            try {
+                const resp = await fetch("/api/place-order", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify(payload),
+                });
+                const data = await resp.json();
+                if (!resp.ok || !data.ok) {
+                    throw new Error(data.error || "order failed");
+                }
+                const order = data.order || {};
+                if (tradeResult) {
+                    tradeResult.style.color = "var(--start)";
+                    tradeResult.textContent =
+                        `Order sent: ${order.side} ${order.symbol} @ ${order.limit_price} | ` +
+                        `Target ${order.target_price} | SL ${order.stop_loss_price}`;
+                }
+            } catch (err) {
+                if (tradeResult) {
+                    tradeResult.style.color = "var(--stop)";
+                    tradeResult.textContent = String(err?.message || err || "order failed");
+                }
+            } finally {
+                if (tradeSubmit) tradeSubmit.disabled = false;
+            }
+        });
 
         const pollDashboardData = async () => {
             try {
                 const resp = await fetch("/api/dashboard-data", { cache: "no-store" });
                 if (!resp.ok) return;
                 const data = await resp.json();
-                const rows = filterRows(data.all_symbols, data.watchlist, viewMode);
-                const emptyMsg = viewMode === "watchlist"
-                    ? "No watchlist hits yet. Add symbols to the watchlist in Settings."
-                    : "No hits yet. Start the scanner and wait for rules to match.";
-                renderScannerRows(rows, data.watchlist, emptyMsg);
+                renderScannerRows(
+                    data.all_symbols || [],
+                    data.watchlist || [],
+                    "No hits yet. Start the scanner and wait for rules to match."
+                );
+                renderNetPositions(data.net_positions || []);
                 applyScannerSymbolFilter();
-
-                if (statUniverse && data.universe_total != null) statUniverse.textContent = String(data.universe_total);
-                if (statBaseline && data.baseline_loaded_count != null) statBaseline.textContent = String(data.baseline_loaded_count);
-                if (statMessage) statMessage.textContent = data.last_message || "Idle";
 
                 if (livePill && livePillText) {
                     if (data.is_started) {
@@ -350,14 +484,6 @@
                     }
                 }
 
-                if (engineStatusText) {
-                    const err = data.last_error ? ` — ${data.last_error}` : "";
-                    engineStatusText.textContent = `${data.last_message || "Idle"}${err}`;
-                }
-                if (eventLog && Array.isArray(data.events)) {
-                    eventLog.innerHTML = data.events.map((e) => `<div class="event-line">${e}</div>`).join("");
-                }
-
                 document.querySelectorAll('button[name="action"][value="start_scanner"]').forEach((b) => {
                     b.disabled = !!data.is_started;
                 });
@@ -367,6 +493,7 @@
             } catch (_) {}
         };
 
+        pollDashboardData();
         setInterval(pollDashboardData, 2000);
         applyScannerSymbolFilter();
     </script>

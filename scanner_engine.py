@@ -77,6 +77,7 @@ def shortlist_session_date_ist(now: datetime | None = None) -> str:
 WS_LATENCY_SUMMARY_INTERVAL_SECS = 2.0
 # Evaluate rules on cached websocket state every 1s; UI polls every 2s (templates).
 EVAL_INTERVAL_SECS = 1.0
+TRADE_MONITOR_INTERVAL_SECS = 1.0
 SHORTLIST_MAX_EVENTS = 2000
 EVAL_CONSOLE_HEARTBEAT = True
 DEBUG_PRINT_SUBSCRIBED_SYMBOLS = True
@@ -152,6 +153,10 @@ class ScannerEngine:
         self._vtt_symbol_minute: dict[str, str] = {}
         self._current_minute_key: str | None = None
         self._startup_minute_key: str | None = None
+        # Wall-clock IST when historical SMA rows were last loaded into _baseline_by_symbol.
+        self._hist_baseline_loaded_at_ist: str | None = None
+        # Wall-clock IST when we first saw the current exchange-minute bucket (VTT baseline window).
+        self._vtt_minute_anchor_wall_ist: str | None = None
         self._scan_ready_from_next_minute = False
         self._last_tick_by_symbol: dict[str, dict[str, Any]] = {}
         self._ws_update_seq = 0
@@ -171,9 +176,17 @@ class ScannerEngine:
         self._ws_nonsymbol_msg_count_last_heartbeat: int = 0
         self._ws_raw_log_window_sec: int = 0
         self._ws_raw_log_count: int = 0
+        self._trade_client: Any | None = None
+        self._managed_trades: dict[str, dict[str, Any]] = {}
+        self._trade_monitor_thread: threading.Thread | None = None
+        self._trade_monitor_stop_event = threading.Event()
+        self._positions_cache_rows: list[dict[str, Any]] = []
+        self._positions_cache_at_monotonic: float = 0.0
         self._scan_config: dict[str, Any] = {
             "rule1_volume_multiplier": 30,
             "rule1_value_cr": 4,
+            "rule2_volume_multiplier": 10,
+            "rule2_value_cr": 6,
             "metric_source": "vol_traded_today_delta",
             "watchlist": [],
         }
@@ -217,6 +230,8 @@ class ScannerEngine:
             self._vtt_symbol_minute = {}
             self._current_minute_key = None
             self._startup_minute_key = None
+            self._hist_baseline_loaded_at_ist = None
+            self._vtt_minute_anchor_wall_ist = None
             self._scan_ready_from_next_minute = False
             self._last_tick_by_symbol = {}
             self._ws_update_seq = 0
@@ -236,6 +251,17 @@ class ScannerEngine:
             self._ws_nonsymbol_msg_count_last_heartbeat = 0
             self._ws_raw_log_window_sec = 0
             self._ws_raw_log_count = 0
+            self._managed_trades = {}
+            self._positions_cache_rows = []
+            self._positions_cache_at_monotonic = 0.0
+            self._trade_monitor_stop_event.clear()
+            if self._trade_monitor_thread is None or not self._trade_monitor_thread.is_alive():
+                self._trade_monitor_thread = threading.Thread(
+                    target=self._trade_monitor_loop,
+                    name="scanner-trade-monitor",
+                    daemon=True,
+                )
+                self._trade_monitor_thread.start()
             self._eval_stop_event.clear()
             self._eval_run_id = run_id
             if scan_config:
@@ -269,6 +295,472 @@ class ScannerEngine:
     def update_scan_config(self, scan_config: dict[str, Any]) -> None:
         with self._lock:
             self._scan_config.update(scan_config)
+
+    def _as_float(self, value: Any) -> float | None:
+        try:
+            if value is None:
+                return None
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    def _as_int(self, value: Any) -> int | None:
+        try:
+            if value is None:
+                return None
+            return int(float(value))
+        except (TypeError, ValueError):
+            return None
+
+    def _extract_order_id(self, response: Any) -> str | None:
+        if not isinstance(response, dict):
+            return None
+        keys = ("id", "order_id", "orderId", "norenordno")
+        for key in keys:
+            value = response.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        payload = response.get("data")
+        if isinstance(payload, dict):
+            for key in keys:
+                value = payload.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+        return None
+
+    def _extract_orderbook_rows(self, response: Any) -> list[dict[str, Any]]:
+        if not isinstance(response, dict):
+            return []
+        for key in ("orderBook", "orderbook", "orders", "data"):
+            value = response.get(key)
+            if isinstance(value, list):
+                return [x for x in value if isinstance(x, dict)]
+            if isinstance(value, dict):
+                nested = value.get("orderBook") or value.get("orders")
+                if isinstance(nested, list):
+                    return [x for x in nested if isinstance(x, dict)]
+        return []
+
+    def _extract_positions_rows(self, response: Any) -> list[dict[str, Any]]:
+        if not isinstance(response, dict):
+            return []
+        for key in ("netPositions", "net_positions", "positions", "data"):
+            value = response.get(key)
+            if isinstance(value, list):
+                return [x for x in value if isinstance(x, dict)]
+            if isinstance(value, dict):
+                nested = value.get("netPositions") or value.get("positions")
+                if isinstance(nested, list):
+                    return [x for x in nested if isinstance(x, dict)]
+        return []
+
+    def _normalize_order_state(self, row: dict[str, Any]) -> str:
+        text = str(
+            row.get("status")
+            or row.get("orderStatus")
+            or row.get("order_status")
+            or row.get("message")
+            or ""
+        ).strip().lower()
+        if any(k in text for k in ("filled", "traded", "complete", "executed")):
+            return "filled"
+        if any(k in text for k in ("cancel", "rejected", "expired", "failed")):
+            return "closed_bad"
+        if any(k in text for k in ("open", "pending", "transit", "trigger")):
+            return "open"
+        return text or "unknown"
+
+    def _find_order_row_by_id(self, client: Any, order_id: str) -> dict[str, Any] | None:
+        if not order_id:
+            return None
+        try:
+            ob = client.orderbook()
+        except Exception:  # noqa: BLE001
+            return None
+        rows = self._extract_orderbook_rows(ob)
+        if not rows:
+            return None
+        keys = ("id", "order_id", "orderId", "norenordno")
+        for row in rows:
+            for key in keys:
+                value = row.get(key)
+                if str(value or "").strip() == order_id:
+                    return row
+        return None
+
+    def _position_qty_for_symbol(self, symbol: str) -> int:
+        rows = self.net_positions_snapshot(force_refresh=True)
+        symbol_key = str(symbol or "").strip()
+        for row in rows:
+            if str(row.get("symbol") or "").strip() == symbol_key:
+                return int(row.get("net_qty") or 0)
+        return 0
+
+    def _refresh_net_positions_cache(self) -> list[dict[str, Any]]:
+        with self._lock:
+            client = self._trade_client
+        if client is None:
+            with self._lock:
+                self._positions_cache_rows = []
+                self._positions_cache_at_monotonic = time.monotonic()
+            return []
+
+        try:
+            payload = client.positions()
+        except Exception:  # noqa: BLE001
+            return []
+
+        rows: list[dict[str, Any]] = []
+        for item in self._extract_positions_rows(payload):
+            symbol = str(item.get("symbol") or item.get("tradingsymbol") or "").strip()
+            if not symbol:
+                continue
+            net_qty = self._as_int(
+                item.get("netQty")
+                or item.get("netqty")
+                or item.get("qty")
+                or item.get("quantity")
+            ) or 0
+            realized = self._as_float(
+                item.get("realized_profit")
+                or item.get("realizedPnl")
+                or item.get("pl_realized")
+                or item.get("rpnl")
+                or 0
+            ) or 0.0
+            unrealized = self._as_float(
+                item.get("unrealized_profit")
+                or item.get("unrealizedPnl")
+                or item.get("pl")
+                or item.get("upnl")
+                or 0
+            ) or 0.0
+            ltp = self._as_float(item.get("ltp") or item.get("last_price"))
+            rows.append(
+                {
+                    "symbol": symbol,
+                    "net_qty": int(net_qty),
+                    "side": "LONG" if net_qty > 0 else ("SHORT" if net_qty < 0 else "FLAT"),
+                    "realized_pnl": round(realized, 2),
+                    "unrealized_pnl": round(unrealized, 2),
+                    "ltp": round(float(ltp), 2) if ltp is not None else None,
+                }
+            )
+        rows.sort(key=lambda r: (r["symbol"], -abs(int(r["net_qty"]))))
+        with self._lock:
+            self._positions_cache_rows = rows
+            self._positions_cache_at_monotonic = time.monotonic()
+        return [dict(x) for x in rows]
+
+    def net_positions_snapshot(self, force_refresh: bool = False) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = [dict(x) for x in self._positions_cache_rows]
+            ts = float(self._positions_cache_at_monotonic or 0.0)
+        if not force_refresh and rows and (time.monotonic() - ts) <= 2.0:
+            return rows
+        return self._refresh_net_positions_cache()
+
+    def managed_trades_snapshot(self) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = [dict(v) for v in self._managed_trades.values()]
+        rows.sort(key=lambda x: str(x.get("updated_at") or ""), reverse=True)
+        return rows
+
+    def place_limit_order_from_latest_tick(
+        self,
+        symbol: str,
+        side: str,
+        quantity: int,
+        target_pct: float,
+        stop_loss_pct: float,
+    ) -> dict[str, Any]:
+        side_norm = str(side or "").strip().upper()
+        if side_norm not in {"BUY", "SELL"}:
+            raise ValueError("side must be BUY or SELL")
+        qty = max(int(quantity), 1)
+        target_pct = max(float(target_pct), 0.0)
+        stop_loss_pct = max(float(stop_loss_pct), 0.0)
+        symbol_key = str(symbol or "").strip()
+        if not symbol_key:
+            raise ValueError("symbol is required")
+
+        with self._lock:
+            if not self.status.is_running:
+                raise RuntimeError("scanner is not running")
+            tick = self._last_tick_by_symbol.get(symbol_key) or {}
+            ltp_raw = tick.get("ltp")
+            try:
+                base_price = float(ltp_raw)
+            except (TypeError, ValueError):
+                raise ValueError(f"latest price unavailable for {symbol_key}") from None
+            client = self._trade_client
+
+        if client is None:
+            raise RuntimeError("scanner not ready for order placement; start scanner first")
+
+        side_num = 1 if side_norm == "BUY" else -1
+        limit_price = round(base_price, 2)
+        target_delta = round(limit_price * (target_pct / 100.0), 2)
+        stop_delta = round(limit_price * (stop_loss_pct / 100.0), 2)
+        if side_norm == "BUY":
+            target_price = round(limit_price + target_delta, 2)
+            stop_price = round(max(limit_price - stop_delta, 0.0), 2)
+        else:
+            target_price = round(max(limit_price - target_delta, 0.0), 2)
+            stop_price = round(limit_price + stop_delta, 2)
+
+        payload = {
+            "symbol": symbol_key,
+            "qty": qty,
+            "type": 1,  # Limit order
+            "side": side_num,
+            "productType": "INTRADAY",
+            "limitPrice": limit_price,
+            "stopPrice": 0,
+            "validity": "DAY",
+            "disclosedQty": 0,
+            "offlineOrder": False,
+            # Fyers accepts these for bracket-like target/sl fields in points on some setups.
+            # We send values derived from the current websocket price and user percentages.
+            "stopLoss": stop_delta,
+            "takeProfit": target_delta,
+            "orderTag": "scanner-ui-limit",
+        }
+        response = client.place_order(data=payload)
+        order_id = self._extract_order_id(response)
+        now_txt = datetime.now(IST_ZONE).strftime("%Y-%m-%d %H:%M:%S")
+        trade_id = order_id or f"local-{int(time.time() * 1000)}"
+        with self._lock:
+            self._managed_trades[trade_id] = {
+                "trade_id": trade_id,
+                "entry_order_id": order_id,
+                "exit_order_id": None,
+                "symbol": symbol_key,
+                "side": side_norm,
+                "quantity": qty,
+                "entry_price": limit_price,
+                "target_price": target_price,
+                "stop_loss_price": stop_price,
+                "target_pct": target_pct,
+                "stop_loss_pct": stop_loss_pct,
+                "status": "pending_entry" if order_id else "active",
+                "close_reason": "",
+                "created_at": now_txt,
+                "updated_at": now_txt,
+                "last_price": limit_price,
+                "last_exit_attempt_epoch": 0.0,
+            }
+        self._push_event(
+            f"ORDER {side_norm} {symbol_key} qty={qty} limit={limit_price:.2f} "
+            f"tp={target_price:.2f} ({target_pct:.2f}%) sl={stop_price:.2f} ({stop_loss_pct:.2f}%)"
+        )
+        return {
+            "trade_id": trade_id,
+            "entry_order_id": order_id,
+            "symbol": symbol_key,
+            "side": side_norm,
+            "quantity": qty,
+            "limit_price": limit_price,
+            "target_pct": target_pct,
+            "stop_loss_pct": stop_loss_pct,
+            "target_price": target_price,
+            "stop_loss_price": stop_price,
+            "stop_loss_points": stop_delta,
+            "take_profit_points": target_delta,
+            "broker_payload": payload,
+            "broker_response": response,
+        }
+
+    def _close_position_market(self, symbol: str, net_qty: int, reason: str) -> dict[str, Any]:
+        symbol_key = str(symbol or "").strip()
+        if not symbol_key:
+            raise ValueError("symbol is required")
+        if net_qty == 0:
+            return {"ok": True, "symbol": symbol_key, "message": "already flat"}
+        with self._lock:
+            client = self._trade_client
+            tick = self._last_tick_by_symbol.get(symbol_key) or {}
+            ltp = self._as_float(tick.get("ltp")) or 0.0
+        if client is None:
+            raise RuntimeError("trading client unavailable")
+
+        side_num = -1 if net_qty > 0 else 1
+        qty = abs(int(net_qty))
+        payload = {
+            "symbol": symbol_key,
+            "qty": qty,
+            "type": 2,  # Market exit
+            "side": side_num,
+            "productType": "INTRADAY",
+            "limitPrice": 0,
+            "stopPrice": 0,
+            "validity": "DAY",
+            "disclosedQty": 0,
+            "offlineOrder": False,
+            "stopLoss": 0,
+            "takeProfit": 0,
+            "orderTag": "scanner-auto-exit",
+        }
+        response = client.place_order(data=payload)
+        exit_order_id = self._extract_order_id(response)
+        self._push_event(
+            f"EXIT {symbol_key} qty={qty} reason={reason} "
+            f"(side={'SELL' if side_num < 0 else 'BUY'}, ltp={ltp:.2f})"
+        )
+        return {
+            "ok": True,
+            "symbol": symbol_key,
+            "qty": qty,
+            "exit_side": "SELL" if side_num < 0 else "BUY",
+            "exit_order_id": exit_order_id,
+            "broker_response": response,
+        }
+
+    def exit_position(self, symbol: str) -> dict[str, Any]:
+        qty = self._position_qty_for_symbol(symbol)
+        result = self._close_position_market(symbol=symbol, net_qty=qty, reason="manual_exit")
+        now_txt = datetime.now(IST_ZONE).strftime("%Y-%m-%d %H:%M:%S")
+        symbol_key = str(symbol or "").strip()
+        with self._lock:
+            for trade in self._managed_trades.values():
+                if str(trade.get("symbol") or "").strip() != symbol_key:
+                    continue
+                if trade.get("status") in {"closed", "entry_failed"}:
+                    continue
+                trade["status"] = "closed"
+                trade["close_reason"] = "manual_exit"
+                trade["updated_at"] = now_txt
+                if result.get("exit_order_id"):
+                    trade["exit_order_id"] = result.get("exit_order_id")
+        self.net_positions_snapshot(force_refresh=True)
+        return result
+
+    def _trade_monitor_loop(self) -> None:
+        while not self._trade_monitor_stop_event.is_set():
+            try:
+                self._monitor_managed_trades_once()
+            except Exception as exc:  # noqa: BLE001
+                self._push_event(f"Trade monitor warning: {exc}")
+            self._trade_monitor_stop_event.wait(TRADE_MONITOR_INTERVAL_SECS)
+
+    def _monitor_managed_trades_once(self) -> None:
+        with self._lock:
+            if not self.status.is_running:
+                return
+            client = self._trade_client
+            trades = [dict(v) for v in self._managed_trades.values()]
+        if client is None or not trades:
+            return
+
+        now_txt = datetime.now(IST_ZONE).strftime("%Y-%m-%d %H:%M:%S")
+        for trade in trades:
+            trade_id = str(trade.get("trade_id") or "")
+            status = str(trade.get("status") or "")
+            symbol = str(trade.get("symbol") or "")
+            entry_order_id = str(trade.get("entry_order_id") or "")
+            if not trade_id or not symbol:
+                continue
+
+            if status == "pending_entry" and entry_order_id:
+                row = self._find_order_row_by_id(client, entry_order_id)
+                if row:
+                    order_state = self._normalize_order_state(row)
+                    if order_state == "filled":
+                        fill_price = self._as_float(
+                            row.get("tradedPrice")
+                            or row.get("avgPrice")
+                            or row.get("average_price")
+                            or row.get("limitPrice")
+                        )
+                        with self._lock:
+                            cur = self._managed_trades.get(trade_id)
+                            if cur:
+                                cur["status"] = "active"
+                                cur["updated_at"] = now_txt
+                                if fill_price is not None and fill_price > 0:
+                                    cur["entry_price"] = round(fill_price, 2)
+                                    tp_pct = self._as_float(cur.get("target_pct")) or 0.0
+                                    sl_pct = self._as_float(cur.get("stop_loss_pct")) or 0.0
+                                    if str(cur.get("side") or "") == "BUY":
+                                        cur["target_price"] = round(fill_price * (1 + (tp_pct / 100.0)), 2)
+                                        cur["stop_loss_price"] = round(max(fill_price * (1 - (sl_pct / 100.0)), 0.0), 2)
+                                    else:
+                                        cur["target_price"] = round(max(fill_price * (1 - (tp_pct / 100.0)), 0.0), 2)
+                                        cur["stop_loss_price"] = round(fill_price * (1 + (sl_pct / 100.0)), 2)
+                        self._push_event(
+                            f"ENTRY FILLED {symbol} order={entry_order_id} "
+                            f"trade_id={trade_id}"
+                        )
+                        status = "active"
+                    elif order_state == "closed_bad":
+                        with self._lock:
+                            cur = self._managed_trades.get(trade_id)
+                            if cur:
+                                cur["status"] = "entry_failed"
+                                cur["close_reason"] = "entry_rejected_or_cancelled"
+                                cur["updated_at"] = now_txt
+                        self._push_event(f"ENTRY FAILED {symbol} order={entry_order_id}")
+                        continue
+
+            if status != "active":
+                continue
+
+            with self._lock:
+                cur = self._managed_trades.get(trade_id)
+                tick = self._last_tick_by_symbol.get(symbol) or {}
+            if not cur:
+                continue
+            ltp = self._as_float(tick.get("ltp"))
+            if ltp is None:
+                continue
+            target_price = self._as_float(cur.get("target_price"))
+            stop_price = self._as_float(cur.get("stop_loss_price"))
+            side = str(cur.get("side") or "")
+            hit_target = False
+            hit_stop = False
+            if side == "BUY":
+                hit_target = target_price is not None and ltp >= target_price
+                hit_stop = stop_price is not None and ltp <= stop_price
+            elif side == "SELL":
+                hit_target = target_price is not None and ltp <= target_price
+                hit_stop = stop_price is not None and ltp >= stop_price
+
+            with self._lock:
+                cur = self._managed_trades.get(trade_id)
+                if cur:
+                    cur["last_price"] = round(ltp, 2)
+                    cur["updated_at"] = now_txt
+            if not (hit_target or hit_stop):
+                continue
+
+            reason = "target_hit" if hit_target else "stop_loss_hit"
+            last_attempt = self._as_float(cur.get("last_exit_attempt_epoch")) or 0.0
+            now_epoch = time.monotonic()
+            if now_epoch - last_attempt < 2.0:
+                continue
+            with self._lock:
+                cur2 = self._managed_trades.get(trade_id)
+                if cur2:
+                    cur2["last_exit_attempt_epoch"] = now_epoch
+
+            qty_live = self._position_qty_for_symbol(symbol)
+            if qty_live == 0:
+                with self._lock:
+                    cur3 = self._managed_trades.get(trade_id)
+                    if cur3:
+                        cur3["status"] = "closed"
+                        cur3["close_reason"] = "already_flat"
+                        cur3["updated_at"] = now_txt
+                continue
+            exit_result = self._close_position_market(symbol=symbol, net_qty=qty_live, reason=reason)
+            with self._lock:
+                cur4 = self._managed_trades.get(trade_id)
+                if cur4:
+                    cur4["status"] = "closed"
+                    cur4["close_reason"] = reason
+                    cur4["updated_at"] = now_txt
+                    cur4["exit_order_id"] = exit_result.get("exit_order_id")
+            self.net_positions_snapshot(force_refresh=True)
 
     def _persist_shortlist_state_nolock(self) -> None:
         want = shortlist_session_date_ist()
@@ -355,16 +847,22 @@ class ScannerEngine:
             self._persist_shortlist_state_nolock()
 
     def stop(self) -> None:
+        monitor_thread: threading.Thread | None = None
         with self._lock:
             self._active_run_id += 1
             self._eval_run_id = self._active_run_id
             self._stop_event.set()
             self._eval_stop_event.set()
+            self._trade_monitor_stop_event.set()
+            monitor_thread = self._trade_monitor_thread
             self._disconnect_ws()
             self._close_stale_process()
+            self._trade_client = None
             self.status.is_running = False
             self.status.last_message = "Stopped"
             self._push_event("Pipeline stopped by user.")
+        if monitor_thread is not None and monitor_thread.is_alive():
+            monitor_thread.join(timeout=2.0)
 
     def snapshot(self) -> EngineStatus:
         if not self._try_acquire_lock(timeout_secs=1.0):
@@ -400,10 +898,21 @@ class ScannerEngine:
         finally:
             self._lock.release()
 
-    def sample_data_snapshot(self) -> tuple[str, list[dict[str, Any]]]:
+    def _sample_data_meta_nolock(self) -> dict[str, Any]:
+        return {
+            "historical_baseline_loaded_at_ist": self._hist_baseline_loaded_at_ist,
+            "vtt_exchange_minute_key": self._current_minute_key,
+            "vtt_minute_anchor_wall_ist": self._vtt_minute_anchor_wall_ist,
+        }
+
+    def sample_data_snapshot(self) -> tuple[str, list[dict[str, Any]], dict[str, Any]]:
         if not self._try_acquire_lock(timeout_secs=1.0):
             minute_key = datetime.now(IST_ZONE).strftime("%Y-%m-%d %H:%M")
-            return minute_key, []
+            return minute_key, [], {
+                "historical_baseline_loaded_at_ist": None,
+                "vtt_exchange_minute_key": None,
+                "vtt_minute_anchor_wall_ist": None,
+            }
         try:
             minute_key = datetime.now(IST_ZONE).strftime("%Y-%m-%d %H:%M")
             rows: list[dict[str, Any]] = []
@@ -438,7 +947,7 @@ class ScannerEngine:
                         "exch_time": tick.get("exch_time", "--"),
                     }
                 )
-            return minute_key, rows
+            return minute_key, rows, self._sample_data_meta_nolock()
         finally:
             self._lock.release()
 
@@ -446,10 +955,14 @@ class ScannerEngine:
         self,
         since_seq: int,
         since_minute: str,
-    ) -> tuple[str, int, bool, list[dict[str, Any]]]:
+    ) -> tuple[str, int, bool, list[dict[str, Any]], dict[str, Any]]:
         if not self._try_acquire_lock(timeout_secs=1.0):
             minute_key = datetime.now(IST_ZONE).strftime("%Y-%m-%d %H:%M")
-            return minute_key, int(self._ws_update_seq), True, []
+            return minute_key, int(self._ws_update_seq), True, [], {
+                "historical_baseline_loaded_at_ist": None,
+                "vtt_exchange_minute_key": None,
+                "vtt_minute_anchor_wall_ist": None,
+            }
         try:
             minute_key = datetime.now(IST_ZONE).strftime("%Y-%m-%d %H:%M")
             current_seq = int(self._ws_update_seq)
@@ -499,7 +1012,7 @@ class ScannerEngine:
                         "exch_time": tick.get("exch_time", "--"),
                     }
                 )
-            return minute_key, current_seq, force_full, rows
+            return minute_key, current_seq, force_full, rows, self._sample_data_meta_nolock()
         finally:
             self._lock.release()
 
@@ -573,6 +1086,7 @@ class ScannerEngine:
             fyers, access_token = self._login_fyers_from_csv()
             if not self._is_active(run_id):
                 return
+            self._trade_client = fyers
 
             self._set_message("Fetching historical candles + SMA...", run_id)
             rows = self._fetch_and_build_snapshots(
@@ -585,6 +1099,7 @@ class ScannerEngine:
                 return
             self._save_snapshots(rows)
             self._baseline_by_symbol = {row["symbol_name"]: row for row in rows}
+            self._hist_baseline_loaded_at_ist = datetime.now(IST_ZONE).strftime("%Y-%m-%d %H:%M:%S")
             self._set_message(f"Saved {len(rows)} rows to {COMBINED_CSV_PATH.name}", run_id)
 
             if self._stop_event.is_set():
@@ -1121,6 +1636,8 @@ class ScannerEngine:
             self._ensure_shortlist_session_locked()
             rule1_mult = float(self._scan_config.get("rule1_volume_multiplier", 30))
             rule1_value_cr = float(self._scan_config.get("rule1_value_cr", 4))
+            rule2_mult = float(self._scan_config.get("rule2_volume_multiplier", 10))
+            rule2_value_cr = float(self._scan_config.get("rule2_value_cr", 6))
             symbols = list(self._baseline_by_symbol.keys())
 
         for symbol in symbols:
@@ -1161,12 +1678,14 @@ class ScannerEngine:
 
             value_rupees = diff * ltp
             condition1 = diff > (rule1_mult * sma_value) and value_rupees > (rule1_value_cr * 1e7)
+            condition2 = diff > (rule2_mult * sma_value) and value_rupees > (rule2_value_cr * 1e7)
+            condition_any = condition1 or condition2
 
             with self._lock:
                 if not self._is_active(run_id):
                     return processed_symbols, new_hits
                 prev = self._last_qual_true.get(symbol, False)
-                if condition1:
+                if condition_any:
                     if not prev:
                         self._symbol_today_hits[symbol] = self._symbol_today_hits.get(symbol, 0) + 1
                         hit_n = self._symbol_today_hits[symbol]
@@ -1174,6 +1693,12 @@ class ScannerEngine:
                             ((ltp - base_close) / base_close * 100.0) if base_close > 0 else 0.0
                         )
                         relative_vol = (diff / sma_value) if sma_value > 0 else 0.0
+                        if condition1 and condition2:
+                            condition_tag = "C1+C2"
+                        elif condition1:
+                            condition_tag = "C1"
+                        else:
+                            condition_tag = "C2"
                         row = {
                             "time": readable_ts,
                             "symbol": symbol,
@@ -1183,7 +1708,7 @@ class ScannerEngine:
                             "metric_source": "vol_traded_today_delta",
                             "relative_vol": round(relative_vol, 2),
                             "trade_value_cr": round(value_rupees / 1e7, 3),
-                            "condition": "C1",
+                            "condition": condition_tag,
                             "hits": hit_n,
                             "symbol_repeat": hit_n > 1,
                         }
@@ -1192,7 +1717,7 @@ class ScannerEngine:
                             self._shortlist_events = self._shortlist_events[-SHORTLIST_MAX_EVENTS:]
                         self._persist_shortlist_state_nolock()
                         self._push_event(
-                            f"SHORTLISTED {symbol} via C1 "
+                            f"SHORTLISTED {symbol} via {condition_tag} "
                             f"(vtt_diff={diff:.0f}, rel_vol={relative_vol:.2f}x, "
                             f"trade_value={value_rupees/1e7:.2f} Cr, day_hit={hit_n})"
                         )
@@ -1486,6 +2011,7 @@ class ScannerEngine:
     def _roll_minute_if_needed(self, minute_key: str) -> None:
         if self._current_minute_key is None:
             self._current_minute_key = minute_key
+            self._vtt_minute_anchor_wall_ist = datetime.now(IST_ZONE).strftime("%Y-%m-%d %H:%M:%S")
             return
         if minute_key == self._current_minute_key:
             return
@@ -1493,6 +2019,7 @@ class ScannerEngine:
             return
 
         self._current_minute_key = minute_key
+        self._vtt_minute_anchor_wall_ist = datetime.now(IST_ZONE).strftime("%Y-%m-%d %H:%M:%S")
         if not self._scan_ready_from_next_minute:
             self._scan_ready_from_next_minute = True
             self._push_event(f"Minute boundary reached at {minute_key}. Live scanner active.")

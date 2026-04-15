@@ -38,7 +38,12 @@
         </div>
 
         <p class="info-banner">
-            IST minute: <strong id="minute-key-text">{{ minute_key }}</strong> · Baseline VTT at minute start, current VTT, diff, and value (₹).
+            IST minute (wall): <strong id="minute-key-text">{{ minute_key }}</strong>
+            · Historical baseline fetch done (IST): <strong id="hist-baseline-at">{{ sample_meta.get('historical_baseline_loaded_at_ist') or '--' }}</strong>
+            · VTT window (exchange minute): <strong id="vtt-exch-minute">{{ sample_meta.get('vtt_exchange_minute_key') or '--' }}</strong>
+            · First tick in this window (IST wall): <strong id="vtt-window-anchor">{{ sample_meta.get('vtt_minute_anchor_wall_ist') or '--' }}</strong>
+            <br>
+            <span class="info-banner-sub">Baseline VTT at minute start, current VTT, diff, and value (₹).</span>
         </p>
 
         <section class="panel-block" style="margin-top:0.75rem;">
@@ -100,6 +105,9 @@
         const searchInput = document.getElementById("symbol-search-input");
         const tableBody = document.getElementById("sample-table-body");
         const minuteKeyText = document.getElementById("minute-key-text");
+        const histBaselineAt = document.getElementById("hist-baseline-at");
+        const vttExchMinute = document.getElementById("vtt-exch-minute");
+        const vttWindowAnchor = document.getElementById("vtt-window-anchor");
         const wsRawAt = document.getElementById("ws-raw-at");
         const wsTickCounts = document.getElementById("ws-tick-counts");
         const wsFeedLag = document.getElementById("ws-feed-lag");
@@ -211,6 +219,16 @@
                 if (!resp.ok) return;
                 const data = await resp.json();
                 if (minuteKeyText && data.minute_key) minuteKeyText.textContent = data.minute_key;
+                const meta = data.sample_meta || {};
+                if (histBaselineAt) {
+                    histBaselineAt.textContent = meta.historical_baseline_loaded_at_ist || "--";
+                }
+                if (vttExchMinute) {
+                    vttExchMinute.textContent = meta.vtt_exchange_minute_key || "--";
+                }
+                if (vttWindowAnchor) {
+                    vttWindowAnchor.textContent = meta.vtt_minute_anchor_wall_ist || "--";
+                }
                 latestMinute = data.minute_key || latestMinute;
                 latestSeq = Number.isFinite(Number(data.seq)) ? Number(data.seq) : latestSeq;
                 if (data.full) renderSampleRows(data.rows || []);
