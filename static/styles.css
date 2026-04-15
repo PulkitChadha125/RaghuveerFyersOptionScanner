@@ -681,3 +681,188 @@ details.advanced-rules summary {
     font-family: inherit;
     margin: 0 14px 12px;
 }
+
+/* ——— Compact layout for small panes (e.g. 1/3 laptop width) ——— */
+@media (max-width: 1100px) {
+    .scanner-app {
+        max-width: none;
+        padding: 10px 10px 16px;
+    }
+
+    .scanner-header {
+        padding: 9px 10px;
+        margin-bottom: 8px;
+    }
+
+    .scanner-title {
+        font-size: 1rem;
+    }
+
+    .live-pill {
+        padding: 5px 9px;
+        font-size: 0.7rem;
+    }
+
+    .scanner-toolbar {
+        gap: 6px;
+        margin-bottom: 8px;
+    }
+
+    .toolbar-btn {
+        padding: 7px 12px;
+        font-size: 0.78rem;
+    }
+
+    .nav-pill {
+        margin-left: 0;
+        width: 100%;
+    }
+
+    .nav-pill a {
+        flex: 1 1 auto;
+        text-align: center;
+        padding: 7px 10px;
+        font-size: 0.75rem;
+    }
+
+    .scanner-panel-head {
+        gap: 8px;
+    }
+
+    .scanner-symbol-search {
+        width: 100%;
+        gap: 6px;
+    }
+
+    .scanner-search-field {
+        flex: 1 1 190px;
+        width: auto;
+        min-width: 0;
+        padding: 7px 10px;
+        font-size: 0.78rem;
+    }
+
+    .scanner-search-btn,
+    .scanner-clear-btn {
+        padding: 7px 10px !important;
+        font-size: 0.75rem !important;
+    }
+
+    .panel-block-header {
+        padding: 8px 10px;
+        font-size: 0.72rem;
+    }
+
+    .scanner-table-wrap {
+        max-height: min(56vh, 520px);
+    }
+
+    .data-table {
+        font-size: 0.74rem;
+    }
+
+    .data-table thead th {
+        padding: 7px 7px;
+    }
+
+    .data-table td {
+        padding: 7px 7px;
+    }
+
+    .trade-btn {
+        padding: 5px 9px;
+        font-size: 0.7rem;
+    }
+
+    .watch-icon-btn {
+        width: 26px;
+        height: 26px;
+        font-size: 0.84rem;
+    }
+
+    .modal-backdrop {
+        padding: 10px;
+    }
+
+    .modal-panel {
+        max-width: 98vw;
+        max-height: 94vh;
+    }
+
+    .modal-head {
+        padding: 10px 12px;
+    }
+
+    .modal-head h2 {
+        font-size: 0.96rem;
+    }
+
+    .modal-body {
+        padding: 12px;
+    }
+
+    .settings-criteria-row {
+        gap: 6px;
+        margin-bottom: 9px;
+    }
+
+    .settings-criteria-row label {
+        min-width: 95px;
+        font-size: 0.88rem;
+    }
+
+    .settings-criteria-row input[type="number"] {
+        width: 84px;
+        padding: 6px 7px;
+        font-size: 0.86rem;
+    }
+
+    .settings-criteria-row .criteria-suffix {
+        font-size: 0.88rem;
+    }
+
+    .btn-primary,
+    .btn-secondary {
+        padding: 8px 12px;
+        font-size: 0.82rem;
+    }
+}
+
+@media (max-width: 760px) {
+    body {
+        font-size: 13px;
+    }
+
+    .scanner-title {
+        font-size: 0.94rem;
+    }
+
+    .data-table {
+        font-size: 0.7rem;
+    }
+
+    .data-table thead th,
+    .data-table td {
+        padding: 6px 6px;
+    }
+
+    .trade-btn {
+        min-width: 44px;
+        padding: 4px 8px;
+        font-size: 0.66rem;
+    }
+
+    .settings-criteria-row {
+        flex-wrap: wrap;
+    }
+
+    .settings-criteria-row label {
+        min-width: 100%;
+        font-size: 0.82rem;
+    }
+
+    .settings-criteria-row input[type="number"] {
+        width: 100%;
+        max-width: 150px;
+    }
+}

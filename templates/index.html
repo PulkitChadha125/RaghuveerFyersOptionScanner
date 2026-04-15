@@ -50,15 +50,12 @@
                     <table class="data-table">
                         <thead>
                             <tr>
-                                <th>#</th>
-                                <th>Hit #</th>
                                 <th>Symbol</th>
                                 <th>LTP</th>
                                 <th>Time</th>
                                 <th>RVOL</th>
                                 <th>LTP %</th>
                                 <th>Value (Cr)</th>
-                                <th>Rule</th>
                                 <th>Buy</th>
                                 <th>Sell</th>
                                 <th>★</th>
@@ -68,15 +65,12 @@
                             {% if all_symbols %}
                                 {% for stock in all_symbols %}
                                 <tr class="{% if stock.symbol_repeat %}scanner-row-repeat{% endif %}" data-symbol="{{ stock.symbol|lower }}">
-                                    <td>{{ loop.index }}</td>
-                                    <td>{{ stock.hits }}</td>
                                     <td>{{ stock.symbol }}</td>
                                     <td>{{ stock.ltp }}</td>
-                                    <td>{{ stock.time }}</td>
+                                    <td>{{ stock.time.split(' ')[1] if stock.time and (' ' in stock.time) else stock.time }}</td>
                                     <td>{{ stock.relative_vol }}x</td>
                                     <td>{{ stock.change_pct }}</td>
                                     <td>{{ stock.trade_value_cr }}</td>
-                                    <td>{{ stock.condition }}</td>
                                     <td>
                                         <button type="button" class="trade-btn buy" data-side="BUY" data-symbol="{{ stock.symbol }}" data-ltp="{{ stock.ltp }}">Buy</button>
                                     </td>
@@ -98,7 +92,7 @@
                                 {% endfor %}
                             {% else %}
                                 <tr>
-                                    <td colspan="12" class="empty-row">No hits yet. Start the scanner and wait for rules to match.</td>
+                                    <td colspan="9" class="empty-row">No hits yet. Start the scanner and wait for rules to match.</td>
                                 </tr>
                             {% endif %}
                         </tbody>
@@ -339,21 +333,18 @@
         const renderScannerRows = (rows, watchlist, emptyText) => {
             if (!tableBody) return;
             if (!rows || rows.length === 0) {
-                tableBody.innerHTML = `<tr><td colspan="12" class="empty-row">${emptyText}</td></tr>`;
+                tableBody.innerHTML = `<tr><td colspan="9" class="empty-row">${emptyText}</td></tr>`;
                 return;
             }
             const wl = new Set(watchlist || []);
-            tableBody.innerHTML = rows.map((stock, i) => `
+            tableBody.innerHTML = rows.map((stock) => `
                 <tr class="${stock.symbol_repeat ? "scanner-row-repeat" : ""}" data-symbol="${String(stock.symbol || "").toLowerCase()}">
-                    <td>${i + 1}</td>
-                    <td>${stock.hits ?? "-"}</td>
                     <td>${stock.symbol ?? "-"}</td>
                     <td>${stock.ltp ?? "-"}</td>
-                    <td>${stock.time ?? "-"}</td>
+                    <td>${timeOnly(stock.time)}</td>
                     <td>${stock.relative_vol ?? "-"}x</td>
                     <td>${stock.change_pct ?? "-"}</td>
                     <td>${stock.trade_value_cr ?? "-"}</td>
-                    <td>${stock.condition ?? "-"}</td>
                     <td>${buildTradeButton(stock, "BUY")}</td>
                     <td>${buildTradeButton(stock, "SELL")}</td>
                     <td>${buildWatchButton(stock, wl)}</td>
@@ -365,6 +356,13 @@
             const n = Number(v);
             if (!Number.isFinite(n)) return "-";
             return n.toLocaleString("en-IN", { maximumFractionDigits: 2 });
+        };
+
+        const timeOnly = (value) => {
+            const t = String(value ?? "").trim();
+            if (!t) return "-";
+            const parts = t.split(" ");
+            return parts.length > 1 ? parts[parts.length - 1] : t;
         };
 
         const renderNetPositions = (rows) => {
