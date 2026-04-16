@@ -49,6 +49,25 @@ def parse_int(field_name: str, fallback: int) -> int:
         return fallback
 
 
+def _latest_unique_rows(
+    rows: list[dict],
+    allowed_symbols: set[str] | None = None,
+) -> list[dict]:
+    out: list[dict] = []
+    seen: set[str] = set()
+    for row in rows:
+        symbol = str(row.get("symbol") or "").strip()
+        if not symbol:
+            continue
+        if allowed_symbols is not None and symbol not in allowed_symbols:
+            continue
+        if symbol in seen:
+            continue
+        seen.add(symbol)
+        out.append(row)
+    return out
+
+
 @app.route("/", methods=["GET", "POST"])
 def home():
     if request.method == "POST":
@@ -170,6 +189,22 @@ def home():
     )
 
 
+@app.route("/watchlist", methods=["GET"])
+def watchlist_dashboard():
+    status = ENGINE.snapshot()
+    RUNTIME_SETTINGS["is_started"] = status.is_running
+    all_symbols = list(status.shortlisted_rows)
+    watchset = set(RUNTIME_SETTINGS["watchlist"])
+    watchlist_rows = _latest_unique_rows(all_symbols, allowed_symbols=watchset)
+    return render_template(
+        "watchlist.html",
+        watchlist_rows=watchlist_rows,
+        settings=RUNTIME_SETTINGS,
+        watchlist=RUNTIME_SETTINGS["watchlist"],
+        engine_status=status,
+    )
+
+
 @app.route("/sample-data", methods=["GET"])
 def sample_data():
     status = ENGINE.snapshot()
@@ -208,6 +243,48 @@ def dashboard_data():
             "managed_trades": managed_trades,
             "universe_total": _universe_symbol_count(),
             "baseline_loaded_count": ENGINE.baseline_loaded_count(),
+        }
+    )
+
+
+@app.route("/api/watchlist-data", methods=["GET"])
+def watchlist_data_api():
+    status = ENGINE.snapshot()
+    all_symbols = list(status.shortlisted_rows)
+    watchset = set(RUNTIME_SETTINGS["watchlist"])
+    rows = _latest_unique_rows(all_symbols, allowed_symbols=watchset)
+    return jsonify(
+        {
+            "is_started": status.is_running,
+            "watchlist": RUNTIME_SETTINGS["watchlist"],
+            "rows": rows,
+        }
+    )
+
+
+@app.route("/api/symbol-ltp", methods=["GET"])
+def symbol_ltp_api():
+    symbol = str(request.args.get("symbol", "")).strip()
+    if not symbol:
+        return jsonify({"ok": False, "error": "symbol is required"}), 400
+    quote = ENGINE.latest_quote_for_symbol(symbol)
+    if not quote:
+        return jsonify({"ok": False, "symbol": symbol, "ltp": None}), 404
+
+    ltp = quote.get("ltp")
+    upper = quote.get("upper_circuit")
+    lower = quote.get("lower_circuit")
+    bid = quote.get("bid_price")
+    ask = quote.get("ask_price")
+    return jsonify(
+        {
+            "ok": True,
+            "symbol": symbol,
+            "ltp": round(float(ltp), 2) if ltp is not None else None,
+            "upper_circuit": round(float(upper), 2) if upper is not None else None,
+            "lower_circuit": round(float(lower), 2) if lower is not None else None,
+            "bid_price": round(float(bid), 2) if bid is not None else None,
+            "ask_price": round(float(ask), 2) if ask is not None else None,
         }
     )
 

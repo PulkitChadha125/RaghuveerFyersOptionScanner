@@ -898,6 +898,53 @@ class ScannerEngine:
         finally:
             self._lock.release()
 
+    def latest_ltp_for_symbol(self, symbol: str) -> float | None:
+        symbol_key = str(symbol or "").strip()
+        if not symbol_key:
+            return None
+        if not self._try_acquire_lock(timeout_secs=1.0):
+            return None
+        try:
+            tick = self._last_tick_by_symbol.get(symbol_key) or {}
+            raw = tick.get("ltp")
+            try:
+                return float(raw) if raw is not None else None
+            except (TypeError, ValueError):
+                return None
+        finally:
+            self._lock.release()
+
+    def latest_quote_for_symbol(self, symbol: str) -> dict[str, float | None] | None:
+        symbol_key = str(symbol or "").strip()
+        if not symbol_key:
+            return None
+        if not self._try_acquire_lock(timeout_secs=1.0):
+            return None
+        try:
+            tick = self._last_tick_by_symbol.get(symbol_key) or {}
+            if not tick:
+                return None
+
+            def pick_float(*keys: str) -> float | None:
+                for key in keys:
+                    raw = tick.get(key)
+                    try:
+                        if raw is not None:
+                            return float(raw)
+                    except (TypeError, ValueError):
+                        continue
+                return None
+
+            return {
+                "ltp": pick_float("ltp"),
+                "upper_circuit": pick_float("upper_circuit", "upper_ckt", "uc", "uc_price"),
+                "lower_circuit": pick_float("lower_circuit", "lower_ckt", "lc", "lc_price"),
+                "bid_price": pick_float("bid_price"),
+                "ask_price": pick_float("ask_price"),
+            }
+        finally:
+            self._lock.release()
+
     def _sample_data_meta_nolock(self) -> dict[str, Any]:
         return {
             "historical_baseline_loaded_at_ist": self._hist_baseline_loaded_at_ist,
@@ -1980,6 +2027,24 @@ class ScannerEngine:
             "last_traded_qty": parsed_ltq,
             "ltq": message.get("ltq"),
             "ltp": message.get("ltp"),
+            "upper_circuit": (
+                message.get("upper_circuit")
+                if message.get("upper_circuit") is not None
+                else (
+                    message.get("upper_ckt")
+                    if message.get("upper_ckt") is not None
+                    else (message.get("uc") if message.get("uc") is not None else message.get("uc_price"))
+                )
+            ),
+            "lower_circuit": (
+                message.get("lower_circuit")
+                if message.get("lower_circuit") is not None
+                else (
+                    message.get("lower_ckt")
+                    if message.get("lower_ckt") is not None
+                    else (message.get("lc") if message.get("lc") is not None else message.get("lc_price"))
+                )
+            ),
             "vol_traded_today": message.get("vol_traded_today"),
             "bid_price": message.get("bid_price"),
             "ask_price": message.get("ask_price"),

@@ -1,26 +1,26 @@
 /* Raghuveer scanner — layout inspired by compact trading dashboards; palette: cream white + brown accents */
 :root {
-    --cream: #faf8f5;
-    --cream-deep: #f0ebe4;
-    --panel: #ffffff;
-    --brown-900: #3d2f24;
-    --brown-800: #5c4333;
-    --brown-700: #7a5a45;
-    --brown-200: #e8ddd4;
-    --brown-100: #f3ece5;
-    --border: #dccfc4;
-    --text: #2c2219;
-    --muted: #6b5d52;
-    --accent: #c45c2a;
-    --accent-soft: #fde8dc;
-    --start: #4a7c59;
-    --start-hover: #3d684a;
-    --stop: #b54a4a;
-    --stop-hover: #9a3e3e;
-    --repeat-green-bg: rgba(74, 124, 89, 0.14);
-    --repeat-green-border: #4a7c59;
-    --live: #3d8b55;
-    --shadow: 0 10px 28px rgba(45, 35, 28, 0.08);
+    --cream: #0f131b;
+    --cream-deep: #151c27;
+    --panel: #1b2432;
+    --brown-900: #edf3ff;
+    --brown-800: #d3def4;
+    --brown-700: #b8c6e6;
+    --brown-200: #2a3649;
+    --brown-100: #202a3b;
+    --border: #33445c;
+    --text: #e7edf8;
+    --muted: #9aa9c7;
+    --accent: #ff8a3d;
+    --accent-soft: #3a2a1f;
+    --start: #3fa36a;
+    --start-hover: #368c5b;
+    --stop: #c75a5a;
+    --stop-hover: #aa4a4a;
+    --repeat-green-bg: rgba(63, 163, 106, 0.18);
+    --repeat-green-border: #3fa36a;
+    --live: #5dd287;
+    --shadow: 0 12px 30px rgba(0, 0, 0, 0.35);
     --radius: 14px;
     --radius-sm: 10px;
 }
@@ -41,9 +41,10 @@ a:hover { color: var(--accent); }
 
 /* ——— App frame ——— */
 .scanner-app {
-    max-width: 1400px;
-    margin: 0 auto;
-    padding: 16px 18px 28px;
+    width: 100%;
+    max-width: none;
+    margin: 0;
+    padding: 10px 14px 16px;
     min-height: 100vh;
 }
 
@@ -181,11 +182,36 @@ a:hover { color: var(--accent); }
     border: 1px solid var(--border);
     background: var(--panel);
 }
-.nav-pill a:hover { background: var(--accent-soft); border-color: #f0c4a8; }
+.nav-pill .nav-pill-btn {
+    text-decoration: none;
+    padding: 8px 14px;
+    border-radius: var(--radius-sm);
+    font-weight: 700;
+    font-size: 0.82rem;
+    color: var(--brown-800);
+    border: 1px solid var(--border);
+    background: var(--panel);
+    font-family: inherit;
+    cursor: pointer;
+}
+.nav-pill a:hover { background: var(--accent-soft); border-color: var(--accent); }
+.nav-pill .nav-pill-btn:hover { background: var(--accent-soft); border-color: var(--accent); }
 .nav-pill a.active {
     background: var(--accent-soft);
     border-color: var(--accent);
     color: var(--brown-900);
+}
+
+.nav-pill .nav-settings-btn {
+    background: #5f4bb6;
+    border-color: #7c66dd;
+    color: #f6f2ff;
+}
+
+.nav-pill .nav-settings-btn:hover {
+    background: #6f5bc9;
+    border-color: #8d79e8;
+    color: #ffffff;
 }
 
 .info-banner {
@@ -334,7 +360,7 @@ a:hover { color: var(--accent); }
 .scanner-table-wrap {
     flex: 1;
     overflow: auto;
-    max-height: min(62vh, 640px);
+    max-height: min(80vh, 720px);
 }
 
 .data-table {
@@ -349,7 +375,7 @@ a:hover { color: var(--accent); }
     background: var(--brown-100);
     color: var(--brown-800);
     font-weight: 700;
-    text-align: left;
+    text-align: center;
     padding: 10px 10px;
     border-bottom: 2px solid var(--border);
     white-space: nowrap;
@@ -359,6 +385,11 @@ a:hover { color: var(--accent); }
     border-bottom: 1px solid var(--brown-200);
     border-right: 1px solid rgba(220, 207, 196, 0.6);
     vertical-align: middle;
+    text-align: center;
+}
+.data-table #scanner-table-body td {
+    font-size: 0.86rem;
+    font-weight: 700;
 }
 .data-table td:last-child { border-right: none; }
 .data-table tbody tr:hover { background: var(--cream-deep); }
@@ -411,6 +442,52 @@ tr.scanner-row-repeat:hover td {
 .trade-btn.buy:hover { background: var(--start-hover); }
 .trade-btn.sell { background: var(--stop); }
 .trade-btn.sell:hover { background: var(--stop-hover); }
+
+.action-btn {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 6px 10px;
+    font-size: 0.72rem;
+    font-weight: 700;
+    cursor: pointer;
+    color: var(--brown-900);
+    background: var(--panel);
+    font-family: inherit;
+    white-space: nowrap;
+}
+.action-btn:hover {
+    border-color: var(--accent);
+    background: var(--accent-soft);
+}
+
+.chart-btn {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 6px 10px;
+    font-size: 0.72rem;
+    font-weight: 700;
+    cursor: pointer;
+    color: var(--brown-800);
+    background: var(--cream-deep);
+    font-family: inherit;
+    white-space: nowrap;
+}
+.chart-btn:hover {
+    border-color: var(--accent);
+    background: var(--accent-soft);
+    color: var(--brown-900);
+}
+
+.icon-btn {
+    min-width: 34px;
+    height: 30px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    line-height: 1;
+    font-size: 0.9rem;
+}
 
 /* ——— Activity log ——— */
 .activity-block {
@@ -555,6 +632,106 @@ tr.scanner-row-repeat:hover td {
 
 .trade-panel {
     max-width: 460px;
+    background: #f4f6f8;
+    color: #1f2a35;
+    border-color: #d6dde6;
+}
+
+.trade-panel .modal-head {
+    background: #ffffff;
+    border-bottom-color: #dbe3ec;
+}
+
+.trade-panel .modal-head h2 {
+    color: #2a3542;
+}
+
+.trade-panel .modal-close {
+    background: #eef3f8;
+    color: #5d6b79;
+}
+
+.trade-panel .modal-close:hover {
+    background: #dfe8f2;
+    color: #2f3a46;
+}
+
+.trade-panel .modal-body {
+    color: #2a3542;
+}
+
+.trade-popup-head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+    margin: 0 0 12px;
+    padding: 8px 4px 10px;
+    border-bottom: 1px solid #d8e0e8;
+}
+
+.trade-popup-head-main {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    min-width: 0;
+}
+
+.trade-popup-symbol {
+    font-size: 1rem;
+    font-weight: 800;
+    color: #1f2935;
+    letter-spacing: 0.01em;
+}
+
+.trade-popup-ltp {
+    font-size: 0.82rem;
+    color: #5d6b79;
+}
+
+.trade-popup-circuit {
+    font-size: 0.9rem;
+    font-weight: 800;
+    color: #2d3a47;
+    white-space: nowrap;
+}
+
+.trade-panel .settings-criteria-row label {
+    color: #314051;
+}
+
+.trade-panel .settings-criteria-row input[type="number"] {
+    background: #ffffff;
+    color: #1f2a35;
+    border: 1px solid #cad5e0;
+}
+
+.trade-panel .settings-criteria-row .criteria-suffix {
+    color: #536272;
+}
+
+.trade-panel .modal-hint {
+    color: #5f6f7f;
+}
+
+.trade-meta-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    margin: 0 0 12px;
+}
+
+.trade-meta-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 6px 9px;
+    background: var(--cream-deep);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    font-size: 0.78rem;
+    color: var(--brown-800);
 }
 
 .form-field {
@@ -645,7 +822,7 @@ details.advanced-rules summary {
 .watch-row-modal:first-of-type { border-top: none; }
 .remove-btn-modal {
     border: 1px solid var(--stop);
-    background: #fff5f5;
+    background: rgba(199, 90, 90, 0.14);
     color: var(--stop);
     border-radius: 8px;
     padding: 4px 10px;
@@ -685,8 +862,7 @@ details.advanced-rules summary {
 /* ——— Compact layout for small panes (e.g. 1/3 laptop width) ——— */
 @media (max-width: 1100px) {
     .scanner-app {
-        max-width: none;
-        padding: 10px 10px 16px;
+        padding: 8px 8px 14px;
     }
 
     .scanner-header {
@@ -714,12 +890,13 @@ details.advanced-rules summary {
     }
 
     .nav-pill {
-        margin-left: 0;
-        width: 100%;
+        margin-left: auto;
+        width: auto;
     }
 
-    .nav-pill a {
-        flex: 1 1 auto;
+    .nav-pill a,
+    .nav-pill .nav-pill-btn {
+        flex: 0 0 auto;
         text-align: center;
         padding: 7px 10px;
         font-size: 0.75rem;
@@ -754,7 +931,7 @@ details.advanced-rules summary {
     }
 
     .scanner-table-wrap {
-        max-height: min(56vh, 520px);
+        max-height: min(78vh, 640px);
     }
 
     .data-table {
@@ -772,6 +949,16 @@ details.advanced-rules summary {
     .trade-btn {
         padding: 5px 9px;
         font-size: 0.7rem;
+    }
+
+    .chart-btn {
+        padding: 5px 8px;
+        font-size: 0.66rem;
+    }
+
+    .action-btn {
+        padding: 5px 8px;
+        font-size: 0.66rem;
     }
 
     .watch-icon-btn {
@@ -850,6 +1037,16 @@ details.advanced-rules summary {
         min-width: 44px;
         padding: 4px 8px;
         font-size: 0.66rem;
+    }
+
+    .chart-btn {
+        padding: 4px 7px;
+        font-size: 0.62rem;
+    }
+
+    .action-btn {
+        padding: 4px 7px;
+        font-size: 0.62rem;
     }
 
     .settings-criteria-row {
