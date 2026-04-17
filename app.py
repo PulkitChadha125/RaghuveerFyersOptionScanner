@@ -41,6 +41,25 @@ def _universe_symbol_count() -> int:
         return 0
 
 
+def _all_symbols_from_csv() -> list[str]:
+    if not CSV_PATH.exists():
+        return []
+    try:
+        df = pd.read_csv(CSV_PATH)
+        col = "symbol_name" if "symbol_name" in df.columns else df.columns[0]
+        values = [str(x).strip() for x in df[col].tolist() if str(x).strip()]
+    except Exception:  # noqa: BLE001
+        return []
+    seen: set[str] = set()
+    out: list[str] = []
+    for sym in values:
+        if sym in seen:
+            continue
+        seen.add(sym)
+        out.append(sym)
+    return out
+
+
 def parse_int(field_name: str, fallback: int) -> int:
     raw_value = request.form.get(field_name, "").strip()
     try:
@@ -205,6 +224,18 @@ def watchlist_dashboard():
     )
 
 
+@app.route("/all-stocks", methods=["GET"])
+def all_stocks_dashboard():
+    status = ENGINE.snapshot()
+    RUNTIME_SETTINGS["is_started"] = status.is_running
+    return render_template(
+        "all_stocks.html",
+        settings=RUNTIME_SETTINGS,
+        all_symbols_master=_all_symbols_from_csv(),
+        watchlist=RUNTIME_SETTINGS["watchlist"],
+    )
+
+
 @app.route("/sample-data", methods=["GET"])
 def sample_data():
     status = ENGINE.snapshot()
@@ -260,6 +291,14 @@ def watchlist_data_api():
             "rows": rows,
         }
     )
+
+
+@app.route("/api/order-logs", methods=["GET"])
+def order_logs_api():
+    filter_mode = str(request.args.get("filter", "today") or "today").strip().lower()
+    custom_date = str(request.args.get("date", "") or "").strip()
+    rows = ENGINE.order_logs_snapshot(filter_mode=filter_mode, custom_date=custom_date)
+    return jsonify({"ok": True, "filter": filter_mode, "date": custom_date, "rows": rows})
 
 
 @app.route("/api/symbol-ltp", methods=["GET"])

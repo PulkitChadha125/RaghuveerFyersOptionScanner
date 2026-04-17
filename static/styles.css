@@ -395,12 +395,12 @@ a:hover { color: var(--accent); }
 .data-table tbody tr:hover { background: var(--cream-deep); }
 
 tr.scanner-row-repeat td {
-    background: var(--repeat-green-bg);
-    border-bottom-color: rgba(74, 124, 89, 0.35);
+    background: transparent;
+    border-bottom-color: var(--brown-200);
     box-shadow: inset 3px 0 0 var(--repeat-green-border);
 }
 tr.scanner-row-repeat:hover td {
-    background: rgba(74, 124, 89, 0.2);
+    background: var(--cream-deep);
 }
 
 .empty-row {
@@ -712,6 +712,90 @@ tr.scanner-row-repeat:hover td {
 
 .trade-panel .modal-hint {
     color: #5f6f7f;
+}
+
+.trade-risk-info {
+    border: 1px solid #d5dde7;
+    background: #ffffff;
+    border-radius: 8px;
+    padding: 8px 10px;
+    margin: 10px 0 2px;
+    font-size: 0.8rem;
+    color: #3b4a59;
+    display: grid;
+    gap: 4px;
+}
+
+.positions-wrap {
+    max-height: min(44vh, 360px);
+}
+
+.pnl-pos {
+    color: #3fa36a;
+    font-weight: 700;
+}
+
+.pnl-neg {
+    color: #c75a5a;
+    font-weight: 700;
+}
+
+.order-log-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    flex-wrap: wrap;
+}
+
+.order-log-controls {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.order-log-controls select,
+.order-log-controls input[type="date"] {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--panel);
+    color: var(--text);
+    padding: 6px 8px;
+    font-family: inherit;
+    font-size: 0.78rem;
+}
+
+.order-log-apply,
+.exit-pos-btn,
+.view-log-btn {
+    padding: 6px 10px;
+    font-size: 0.74rem;
+}
+
+.order-log-json {
+    margin: 0;
+    white-space: pre-wrap;
+    word-break: break-word;
+    background: var(--cream-deep);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 10px;
+    max-height: 62vh;
+    overflow: auto;
+    font-size: 0.76rem;
+}
+
+.all-stocks-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+}
+
+.all-stocks-search {
+    max-width: 280px;
 }
 
 .trade-meta-row {

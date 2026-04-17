@@ -31,6 +31,7 @@
             <div class="nav-pill">
                 <a href="{{ url_for('home') }}" class="active">Scanner</a>
                 <a href="{{ url_for('watchlist_dashboard') }}">Watchlist</a>
+                <a href="{{ url_for('all_stocks_dashboard') }}">All Stocks</a>
                 <button class="nav-pill-btn nav-settings-btn" type="button" id="open-settings">Settings</button>
             </div>
         </div>
@@ -90,6 +91,58 @@
                                     <td colspan="9" class="empty-row">No hits yet. Start the scanner and wait for rules to match.</td>
                                 </tr>
                             {% endif %}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+            <div class="panel-block">
+                <div class="panel-block-header">Open Positions</div>
+                <div class="scanner-table-wrap positions-wrap">
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th>Symbol</th>
+                                <th>Qty</th>
+                                <th>Side</th>
+                                <th>LTP</th>
+                                <th>Realized PnL</th>
+                                <th>Unrealized PnL</th>
+                                <th>Exit</th>
+                            </tr>
+                        </thead>
+                        <tbody id="positions-table-body">
+                            <tr><td colspan="7" class="empty-row">No open positions.</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+            <div class="panel-block">
+                <div class="panel-block-header order-log-head">
+                    <span>Order Logs</span>
+                    <div class="order-log-controls">
+                        <select id="order-log-filter">
+                            <option value="today" selected>Today</option>
+                            <option value="all">All Logs</option>
+                            <option value="custom">Custom Date</option>
+                        </select>
+                        <input type="date" id="order-log-date">
+                        <button type="button" class="btn-secondary order-log-apply" id="order-log-apply">Apply</button>
+                    </div>
+                </div>
+                <div class="scanner-table-wrap positions-wrap">
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th>Time</th>
+                                <th>Action</th>
+                                <th>Symbol</th>
+                                <th>Side</th>
+                                <th>Status</th>
+                                <th>View</th>
+                            </tr>
+                        </thead>
+                        <tbody id="order-log-body">
+                            <tr><td colspan="6" class="empty-row">No order logs for selected filter.</td></tr>
                         </tbody>
                     </table>
                 </div>
@@ -203,6 +256,20 @@
                         <label for="trade-qty">Quantity</label>
                         <input type="number" min="1" step="1" id="trade-qty" value="1" required>
                     </div>
+                    <div class="settings-criteria-row">
+                        <label for="trade-capital">Capital (Rs)</label>
+                        <input type="number" min="1" step="1" id="trade-capital" value="100000">
+                    </div>
+                    <div class="settings-criteria-row">
+                        <label for="trade-risk-pct">Risk %</label>
+                        <input type="number" min="0.1" step="0.1" id="trade-risk-pct" value="1">
+                        <span class="criteria-suffix">%</span>
+                    </div>
+                    <div class="trade-risk-info">
+                        <div>Per Trade Risk: <strong id="trade-per-risk">--</strong></div>
+                        <div>Risk/Share: <strong id="trade-risk-per-share">--</strong></div>
+                        <div>Suggested Qty: <strong id="trade-suggested-qty">--</strong></div>
+                    </div>
                     <div class="modal-actions" style="border-top:none;padding-top:12px;margin-top:8px;">
                         <button type="button" class="btn-secondary" id="close-trade-2">Close</button>
                         <button type="button" class="trade-btn buy" id="trade-buy-btn">Buy</button>
@@ -210,6 +277,18 @@
                     </div>
                 </form>
                 <p class="modal-hint" id="trade-result" style="margin-top:8px;"></p>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal-backdrop" id="order-log-modal" role="dialog" aria-modal="true" aria-labelledby="order-log-modal-title">
+        <div class="modal-panel">
+            <div class="modal-head">
+                <h2 id="order-log-modal-title">Order Log Detail</h2>
+                <button type="button" class="modal-close" id="close-order-log" aria-label="Close">&times;</button>
+            </div>
+            <div class="modal-body">
+                <pre id="order-log-json" class="order-log-json">--</pre>
             </div>
         </div>
     </div>
@@ -240,6 +319,19 @@
         const tradeTarget = document.getElementById("trade-target-pct");
         const tradeStop = document.getElementById("trade-stop-pct");
         const tradeQty = document.getElementById("trade-qty");
+        const tradeCapital = document.getElementById("trade-capital");
+        const tradeRiskPct = document.getElementById("trade-risk-pct");
+        const tradePerRisk = document.getElementById("trade-per-risk");
+        const tradeRiskPerShare = document.getElementById("trade-risk-per-share");
+        const tradeSuggestedQty = document.getElementById("trade-suggested-qty");
+        const positionsBody = document.getElementById("positions-table-body");
+        const orderLogBody = document.getElementById("order-log-body");
+        const orderLogFilter = document.getElementById("order-log-filter");
+        const orderLogDate = document.getElementById("order-log-date");
+        const orderLogApply = document.getElementById("order-log-apply");
+        const orderLogModal = document.getElementById("order-log-modal");
+        const closeOrderLog = document.getElementById("close-order-log");
+        const orderLogJson = document.getElementById("order-log-json");
         const activeTrade = { symbol: "", ltp: null, upperCircuit: null, lowerCircuit: null };
 
         const applyScannerSymbolFilter = () => {
@@ -275,22 +367,29 @@
         const closeSettingsModal = () => settingsModal?.classList.remove("open");
         const openTradeModal = () => tradeModal?.classList.add("open");
         const closeTradeModal = () => tradeModal?.classList.remove("open");
+        const openOrderLogModal = () => orderLogModal?.classList.add("open");
+        const closeOrderLogModal = () => orderLogModal?.classList.remove("open");
 
         openSettings?.addEventListener("click", openSettingsModal);
         closeSettings?.addEventListener("click", closeSettingsModal);
         closeSettings2?.addEventListener("click", closeSettingsModal);
         closeTrade?.addEventListener("click", closeTradeModal);
         closeTrade2?.addEventListener("click", closeTradeModal);
+        closeOrderLog?.addEventListener("click", closeOrderLogModal);
         settingsModal?.addEventListener("click", (e) => {
             if (e.target === settingsModal) closeSettingsModal();
         });
         tradeModal?.addEventListener("click", (e) => {
             if (e.target === tradeModal) closeTradeModal();
         });
+        orderLogModal?.addEventListener("click", (e) => {
+            if (e.target === orderLogModal) closeOrderLogModal();
+        });
         document.addEventListener("keydown", (e) => {
             if (e.key === "Escape") {
                 closeSettingsModal();
                 closeTradeModal();
+                closeOrderLogModal();
             }
         });
 
@@ -371,6 +470,28 @@
             return Number.isFinite(n) ? `₹${n.toFixed(2)}` : "--";
         };
 
+        const recomputeRiskModel = () => {
+            const ltp = Number(activeTrade.ltp);
+            const slPct = Number(tradeStop?.value || 0);
+            const capital = Math.max(Number(tradeCapital?.value || 0), 0);
+            const riskPct = Math.max(Number(tradeRiskPct?.value || 0), 0);
+            const perTradeRisk = capital * (riskPct / 100);
+            const stopPrice = Number.isFinite(ltp) ? ltp * (1 - slPct / 100) : NaN;
+            const riskPerShare = Number.isFinite(ltp) && Number.isFinite(stopPrice)
+                ? Math.abs(ltp - stopPrice)
+                : NaN;
+            const suggestedQty = Number.isFinite(riskPerShare) && riskPerShare > 0
+                ? Math.max(Math.floor(perTradeRisk / riskPerShare), 1)
+                : NaN;
+
+            if (tradePerRisk) tradePerRisk.textContent = Number.isFinite(perTradeRisk) ? `₹${perTradeRisk.toFixed(2)}` : "--";
+            if (tradeRiskPerShare) tradeRiskPerShare.textContent = Number.isFinite(riskPerShare) ? `₹${riskPerShare.toFixed(2)}` : "--";
+            if (tradeSuggestedQty) tradeSuggestedQty.textContent = Number.isFinite(suggestedQty) ? String(suggestedQty) : "--";
+            if (tradeQty && Number.isFinite(suggestedQty)) {
+                tradeQty.value = String(Math.max(Number(suggestedQty), 1));
+            }
+        };
+
         const fillTradeHint = () => {
             if (tradeMetaSymbol) tradeMetaSymbol.textContent = activeTrade.symbol || "--";
             if (tradeMetaLtp) tradeMetaLtp.textContent = formatPrice(activeTrade.ltp);
@@ -378,6 +499,7 @@
                 tradeMetaCircuit.textContent =
                     `${formatPrice(activeTrade.lowerCircuit)} - ${formatPrice(activeTrade.upperCircuit)}`;
             }
+            recomputeRiskModel();
         };
 
         const refreshActiveTradeLtp = async () => {
@@ -470,6 +592,108 @@
         tradeBuyBtn?.addEventListener("click", () => placeTradeFromModal("BUY"));
         tradeSellBtn?.addEventListener("click", () => placeTradeFromModal("SELL"));
         tradeForm?.addEventListener("submit", (e) => e.preventDefault());
+        tradeStop?.addEventListener("input", recomputeRiskModel);
+        tradeCapital?.addEventListener("input", recomputeRiskModel);
+        tradeRiskPct?.addEventListener("input", recomputeRiskModel);
+
+        const renderNetPositions = (rows) => {
+            if (!positionsBody) return;
+            const data = (rows || []).filter((r) => Number(r.net_qty) !== 0);
+            if (!data.length) {
+                positionsBody.innerHTML = '<tr><td colspan="7" class="empty-row">No open positions.</td></tr>';
+                return;
+            }
+            positionsBody.innerHTML = data.map((r) => {
+                const sym = String(r.symbol || "").replace(/"/g, "&quot;");
+                const realized = Number(r.realized_pnl || 0);
+                const unrealized = Number(r.unrealized_pnl || 0);
+                return `<tr>
+                    <td>${r.symbol ?? "-"}</td>
+                    <td>${r.net_qty ?? 0}</td>
+                    <td>${r.side ?? "-"}</td>
+                    <td>${r.ltp ?? "-"}</td>
+                    <td class="${realized >= 0 ? "pnl-pos" : "pnl-neg"}">${realized.toFixed(2)}</td>
+                    <td class="${unrealized >= 0 ? "pnl-pos" : "pnl-neg"}">${unrealized.toFixed(2)}</td>
+                    <td><button class="btn-secondary exit-pos-btn" data-symbol="${sym}" type="button">Exit</button></td>
+                </tr>`;
+            }).join("");
+        };
+
+        const renderOrderLogs = (rows) => {
+            if (!orderLogBody) return;
+            const data = rows || [];
+            if (!data.length) {
+                orderLogBody.innerHTML = '<tr><td colspan="6" class="empty-row">No order logs for selected filter.</td></tr>';
+                return;
+            }
+            orderLogBody.innerHTML = data.map((log) => {
+                const payload = encodeURIComponent(JSON.stringify(log || {}, null, 2));
+                const status = String(log.status || "-");
+                return `<tr>
+                    <td>${timeOnly(log.created_at)}</td>
+                    <td>${log.action ?? "-"}</td>
+                    <td>${log.symbol ?? "-"}</td>
+                    <td>${log.side ?? "-"}</td>
+                    <td class="${status === "ok" ? "pnl-pos" : "pnl-neg"}">${status}</td>
+                    <td><button type="button" class="btn-secondary view-log-btn" data-payload="${payload}">View</button></td>
+                </tr>`;
+            }).join("");
+        };
+
+        const refreshOrderLogs = async () => {
+            try {
+                const filter = String(orderLogFilter?.value || "today");
+                const params = new URLSearchParams({ filter });
+                if (filter === "custom" && orderLogDate?.value) {
+                    params.set("date", orderLogDate.value);
+                }
+                const resp = await fetch(`/api/order-logs?${params.toString()}`, { cache: "no-store" });
+                if (!resp.ok) return;
+                const data = await resp.json();
+                renderOrderLogs(data.rows || []);
+            } catch (_) {}
+        };
+
+        orderLogApply?.addEventListener("click", refreshOrderLogs);
+        orderLogFilter?.addEventListener("change", () => {
+            if (orderLogFilter.value !== "custom" && orderLogDate) {
+                orderLogDate.value = "";
+            }
+            refreshOrderLogs();
+        });
+        orderLogDate?.addEventListener("change", () => {
+            if (orderLogFilter?.value === "custom") refreshOrderLogs();
+        });
+        if (orderLogDate) {
+            const now = new Date();
+            orderLogDate.value = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+        }
+
+        positionsBody?.addEventListener("click", async (e) => {
+            const btn = e.target.closest("button.exit-pos-btn");
+            if (!btn) return;
+            const symbol = String(btn.dataset.symbol || "");
+            if (!symbol) return;
+            try {
+                btn.disabled = true;
+                await fetch("/api/exit-position", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ symbol }),
+                });
+            } catch (_) {
+            } finally {
+                btn.disabled = false;
+            }
+        });
+
+        orderLogBody?.addEventListener("click", (e) => {
+            const btn = e.target.closest("button.view-log-btn");
+            if (!btn) return;
+            const payload = decodeURIComponent(String(btn.dataset.payload || ""));
+            if (orderLogJson) orderLogJson.textContent = payload || "--";
+            openOrderLogModal();
+        });
 
         const pollDashboardData = async () => {
             try {
@@ -481,6 +705,7 @@
                     data.watchlist || [],
                     "No hits yet. Start the scanner and wait for rules to match."
                 );
+                renderNetPositions(data.net_positions || []);
                 applyScannerSymbolFilter();
 
                 if (livePill && livePillText) {
@@ -503,7 +728,9 @@
         };
 
         pollDashboardData();
-        setInterval(pollDashboardData, 2000);
+        refreshOrderLogs();
+        setInterval(pollDashboardData, 1000);
+        setInterval(refreshOrderLogs, 1000);
         setInterval(() => {
             if (tradeModal?.classList.contains("open")) refreshActiveTradeLtp();
         }, 1000);

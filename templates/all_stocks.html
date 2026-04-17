@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>RiverFlowScanner - All Stocks</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+</head>
+<body>
+    <div class="scanner-app">
+        <header class="scanner-header">
+            <div class="scanner-header-left">
+                <h1 class="scanner-title">RiverFlowScanner</h1>
+            </div>
+            <div class="live-pill {% if settings.is_started %}on{% endif %}" id="live-pill" aria-live="polite">
+                <span class="dot" aria-hidden="true"></span>
+                <span id="live-pill-text">{% if settings.is_started %}Live{% else %}Idle{% endif %}</span>
+            </div>
+        </header>
+
+        <div class="scanner-toolbar">
+            <form method="post" action="{{ url_for('home') }}" style="margin:0;">
+                <button class="toolbar-btn toolbar-btn-start" type="submit" name="action" value="start_scanner" {% if settings.is_started %}disabled{% endif %}>Start</button>
+            </form>
+            <form method="post" action="{{ url_for('home') }}" style="margin:0;">
+                <button class="toolbar-btn toolbar-btn-stop" type="submit" name="action" value="stop_scanner" {% if not settings.is_started %}disabled{% endif %}>Stop</button>
+            </form>
+            <div class="nav-pill">
+                <a href="{{ url_for('home') }}">Scanner</a>
+                <a href="{{ url_for('watchlist_dashboard') }}">Watchlist</a>
+                <a href="{{ url_for('all_stocks_dashboard') }}" class="active">All Stocks</a>
+                <a href="{{ url_for('home') }}" class="nav-pill-btn nav-settings-btn">Settings</a>
+            </div>
+        </div>
+
+        <div class="panel-block">
+            <div class="panel-block-header all-stocks-head">
+                <span>All Symbols</span>
+                <input id="all-stocks-search" class="scanner-search-field all-stocks-search" type="text" placeholder="Search symbol...">
+            </div>
+            <div class="scanner-table-wrap">
+                <table class="data-table">
+                    <thead>
+                        <tr>
+                            <th>★</th>
+                            <th>Symbol</th>
+                        </tr>
+                    </thead>
+                    <tbody id="all-stocks-body">
+                        {% for symbol in all_symbols_master %}
+                        <tr data-symbol="{{ symbol|lower }}">
+                            <td>
+                                {% if symbol in watchlist %}
+                                <form method="post" action="{{ url_for('home') }}" class="inline-form">
+                                    <input type="hidden" name="action" value="remove_watch_symbol">
+                                    <input type="hidden" name="symbol_to_remove" value="{{ symbol }}">
+                                    <button class="watch-icon-btn saved" type="submit" title="Remove from watchlist" aria-label="Remove from watchlist">★</button>
+                                </form>
+                                {% else %}
+                                <form method="post" action="{{ url_for('home') }}" class="inline-form">
+                                    <input type="hidden" name="action" value="add_watch_symbol">
+                                    <input type="hidden" name="symbol_to_add" value="{{ symbol }}">
+                                    <button class="watch-icon-btn" type="submit" title="Add to watchlist" aria-label="Add to watchlist">☆</button>
+                                </form>
+                                {% endif %}
+                            </td>
+                            <td>{{ symbol }}</td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+    <script>
+        const allStocksSearch = document.getElementById("all-stocks-search");
+        const allStocksBody = document.getElementById("all-stocks-body");
+        allStocksSearch?.addEventListener("input", () => {
+            const q = String(allStocksSearch.value || "").trim().toLowerCase();
+            allStocksBody?.querySelectorAll("tr[data-symbol]").forEach((tr) => {
+                const symbol = tr.getAttribute("data-symbol") || "";
+                tr.style.display = !q || symbol.includes(q) ? "" : "none";
+            });
+        });
+    </script>
+</body>
+</html>

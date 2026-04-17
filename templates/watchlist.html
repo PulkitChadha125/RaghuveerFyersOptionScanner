@@ -31,6 +31,7 @@
             <div class="nav-pill">
                 <a href="{{ url_for('home') }}">Scanner</a>
                 <a href="{{ url_for('watchlist_dashboard') }}" class="active">Watchlist</a>
+                <a href="{{ url_for('all_stocks_dashboard') }}">All Stocks</a>
                 <button class="nav-pill-btn nav-settings-btn" type="button" id="open-settings">Settings</button>
             </div>
         </div>
@@ -184,6 +185,20 @@
                         <label for="trade-qty">Quantity</label>
                         <input type="number" min="1" step="1" id="trade-qty" value="1" required>
                     </div>
+                    <div class="settings-criteria-row">
+                        <label for="trade-capital">Capital (Rs)</label>
+                        <input type="number" min="1" step="1" id="trade-capital" value="100000">
+                    </div>
+                    <div class="settings-criteria-row">
+                        <label for="trade-risk-pct">Risk %</label>
+                        <input type="number" min="0.1" step="0.1" id="trade-risk-pct" value="1">
+                        <span class="criteria-suffix">%</span>
+                    </div>
+                    <div class="trade-risk-info">
+                        <div>Per Trade Risk: <strong id="trade-per-risk">--</strong></div>
+                        <div>Risk/Share: <strong id="trade-risk-per-share">--</strong></div>
+                        <div>Suggested Qty: <strong id="trade-suggested-qty">--</strong></div>
+                    </div>
                     <div class="modal-actions" style="border-top:none;padding-top:12px;margin-top:8px;">
                         <button type="button" class="btn-secondary" id="close-trade-2">Close</button>
                         <button type="button" class="trade-btn buy" id="trade-buy-btn">Buy</button>
@@ -214,6 +229,11 @@
         const tradeTarget = document.getElementById("trade-target-pct");
         const tradeStop = document.getElementById("trade-stop-pct");
         const tradeQty = document.getElementById("trade-qty");
+        const tradeCapital = document.getElementById("trade-capital");
+        const tradeRiskPct = document.getElementById("trade-risk-pct");
+        const tradePerRisk = document.getElementById("trade-per-risk");
+        const tradeRiskPerShare = document.getElementById("trade-risk-per-share");
+        const tradeSuggestedQty = document.getElementById("trade-suggested-qty");
         const livePill = document.getElementById("live-pill");
         const livePillText = document.getElementById("live-pill-text");
         const activeTrade = { symbol: "", ltp: null, upperCircuit: null, lowerCircuit: null };
@@ -309,6 +329,28 @@
             return Number.isFinite(n) ? `₹${n.toFixed(2)}` : "--";
         };
 
+        const recomputeRiskModel = () => {
+            const ltp = Number(activeTrade.ltp);
+            const slPct = Number(tradeStop?.value || 0);
+            const capital = Math.max(Number(tradeCapital?.value || 0), 0);
+            const riskPct = Math.max(Number(tradeRiskPct?.value || 0), 0);
+            const perTradeRisk = capital * (riskPct / 100);
+            const stopPrice = Number.isFinite(ltp) ? ltp * (1 - slPct / 100) : NaN;
+            const riskPerShare = Number.isFinite(ltp) && Number.isFinite(stopPrice)
+                ? Math.abs(ltp - stopPrice)
+                : NaN;
+            const suggestedQty = Number.isFinite(riskPerShare) && riskPerShare > 0
+                ? Math.max(Math.floor(perTradeRisk / riskPerShare), 1)
+                : NaN;
+
+            if (tradePerRisk) tradePerRisk.textContent = Number.isFinite(perTradeRisk) ? `₹${perTradeRisk.toFixed(2)}` : "--";
+            if (tradeRiskPerShare) tradeRiskPerShare.textContent = Number.isFinite(riskPerShare) ? `₹${riskPerShare.toFixed(2)}` : "--";
+            if (tradeSuggestedQty) tradeSuggestedQty.textContent = Number.isFinite(suggestedQty) ? String(suggestedQty) : "--";
+            if (tradeQty && Number.isFinite(suggestedQty)) {
+                tradeQty.value = String(Math.max(Number(suggestedQty), 1));
+            }
+        };
+
         const fillTradeHint = () => {
             if (tradeMetaSymbol) tradeMetaSymbol.textContent = activeTrade.symbol || "--";
             if (tradeMetaLtp) tradeMetaLtp.textContent = formatPrice(activeTrade.ltp);
@@ -316,6 +358,7 @@
                 tradeMetaCircuit.textContent =
                     `${formatPrice(activeTrade.lowerCircuit)} - ${formatPrice(activeTrade.upperCircuit)}`;
             }
+            recomputeRiskModel();
         };
 
         const refreshActiveTradeLtp = async () => {
@@ -403,6 +446,9 @@
         tradeBuyBtn?.addEventListener("click", () => placeTradeFromModal("BUY"));
         tradeSellBtn?.addEventListener("click", () => placeTradeFromModal("SELL"));
         tradeForm?.addEventListener("submit", (e) => e.preventDefault());
+        tradeStop?.addEventListener("input", recomputeRiskModel);
+        tradeCapital?.addEventListener("input", recomputeRiskModel);
+        tradeRiskPct?.addEventListener("input", recomputeRiskModel);
 
         const pollWatchlistData = async () => {
             try {

@@ -79,6 +79,7 @@ WS_LATENCY_SUMMARY_INTERVAL_SECS = 2.0
 EVAL_INTERVAL_SECS = 1.0
 TRADE_MONITOR_INTERVAL_SECS = 1.0
 SHORTLIST_MAX_EVENTS = 2000
+ORDER_LOG_MAX_EVENTS = 4000
 EVAL_CONSOLE_HEARTBEAT = True
 DEBUG_PRINT_SUBSCRIBED_SYMBOLS = True
 DEBUG_PRINT_WS_RAW_MESSAGES = True
@@ -178,6 +179,7 @@ class ScannerEngine:
         self._ws_raw_log_count: int = 0
         self._trade_client: Any | None = None
         self._managed_trades: dict[str, dict[str, Any]] = {}
+        self._order_logs: list[dict[str, Any]] = []
         self._trade_monitor_thread: threading.Thread | None = None
         self._trade_monitor_stop_event = threading.Event()
         self._positions_cache_rows: list[dict[str, Any]] = []
@@ -466,6 +468,51 @@ class ScannerEngine:
         rows.sort(key=lambda x: str(x.get("updated_at") or ""), reverse=True)
         return rows
 
+    def _append_order_log(
+        self,
+        *,
+        action: str,
+        symbol: str,
+        side: str,
+        status: str,
+        request_payload: Any,
+        response_payload: Any,
+        message: str = "",
+    ) -> None:
+        now_txt = datetime.now(IST_ZONE).strftime("%Y-%m-%d %H:%M:%S")
+        rec = {
+            "log_id": f"log-{int(time.time() * 1000)}",
+            "created_at": now_txt,
+            "action": str(action or "").strip(),
+            "symbol": str(symbol or "").strip(),
+            "side": str(side or "").strip(),
+            "status": str(status or "").strip(),
+            "message": str(message or "").strip(),
+            "request": request_payload,
+            "response": response_payload,
+        }
+        with self._lock:
+            self._order_logs.append(rec)
+            if len(self._order_logs) > ORDER_LOG_MAX_EVENTS:
+                self._order_logs = self._order_logs[-ORDER_LOG_MAX_EVENTS:]
+
+    def order_logs_snapshot(
+        self,
+        *,
+        filter_mode: str = "today",
+        custom_date: str = "",
+    ) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = [dict(x) for x in self._order_logs]
+        mode = str(filter_mode or "today").strip().lower()
+        date_key = str(custom_date or "").strip()
+        if mode == "today":
+            date_key = datetime.now(IST_ZONE).strftime("%Y-%m-%d")
+        if mode in {"today", "custom"} and date_key:
+            rows = [r for r in rows if str(r.get("created_at") or "").startswith(date_key)]
+        rows.sort(key=lambda x: str(x.get("created_at") or ""), reverse=True)
+        return rows
+
     def place_limit_order_from_latest_tick(
         self,
         symbol: str,
@@ -526,7 +573,19 @@ class ScannerEngine:
             "takeProfit": target_delta,
             "orderTag": "scanner-ui-limit",
         }
-        response = client.place_order(data=payload)
+        try:
+            response = client.place_order(data=payload)
+        except Exception as exc:  # noqa: BLE001
+            self._append_order_log(
+                action="place_entry",
+                symbol=symbol_key,
+                side=side_norm,
+                status="error",
+                request_payload=payload,
+                response_payload={"error": str(exc)},
+                message="place_order failed",
+            )
+            raise
         order_id = self._extract_order_id(response)
         now_txt = datetime.now(IST_ZONE).strftime("%Y-%m-%d %H:%M:%S")
         trade_id = order_id or f"local-{int(time.time() * 1000)}"
@@ -549,7 +608,18 @@ class ScannerEngine:
                 "updated_at": now_txt,
                 "last_price": limit_price,
                 "last_exit_attempt_epoch": 0.0,
+                "last_modify_attempt_epoch": 0.0,
+                "last_modified_price": limit_price,
             }
+        self._append_order_log(
+            action="place_entry",
+            symbol=symbol_key,
+            side=side_norm,
+            status="ok",
+            request_payload=payload,
+            response_payload=response,
+            message=f"entry_order_id={order_id or '-'}",
+        )
         self._push_event(
             f"ORDER {side_norm} {symbol_key} qty={qty} limit={limit_price:.2f} "
             f"tp={target_price:.2f} ({target_pct:.2f}%) sl={stop_price:.2f} ({stop_loss_pct:.2f}%)"
@@ -601,8 +671,29 @@ class ScannerEngine:
             "takeProfit": 0,
             "orderTag": "scanner-auto-exit",
         }
-        response = client.place_order(data=payload)
+        try:
+            response = client.place_order(data=payload)
+        except Exception as exc:  # noqa: BLE001
+            self._append_order_log(
+                action="exit_position",
+                symbol=symbol_key,
+                side="SELL" if side_num < 0 else "BUY",
+                status="error",
+                request_payload=payload,
+                response_payload={"error": str(exc)},
+                message=f"exit failed ({reason})",
+            )
+            raise
         exit_order_id = self._extract_order_id(response)
+        self._append_order_log(
+            action="exit_position",
+            symbol=symbol_key,
+            side="SELL" if side_num < 0 else "BUY",
+            status="ok",
+            request_payload=payload,
+            response_payload=response,
+            message=f"reason={reason}",
+        )
         self._push_event(
             f"EXIT {symbol_key} qty={qty} reason={reason} "
             f"(side={'SELL' if side_num < 0 else 'BUY'}, ltp={ltp:.2f})"
@@ -665,6 +756,8 @@ class ScannerEngine:
                 row = self._find_order_row_by_id(client, entry_order_id)
                 if row:
                     order_state = self._normalize_order_state(row)
+                    if order_state == "open":
+                        self._modify_open_entry_to_best_price(client=client, trade_id=trade_id)
                     if order_state == "filled":
                         fill_price = self._as_float(
                             row.get("tradedPrice")
@@ -761,6 +854,79 @@ class ScannerEngine:
                     cur4["updated_at"] = now_txt
                     cur4["exit_order_id"] = exit_result.get("exit_order_id")
             self.net_positions_snapshot(force_refresh=True)
+
+    def _modify_open_entry_to_best_price(self, client: Any, trade_id: str) -> None:
+        with self._lock:
+            trade = self._managed_trades.get(trade_id)
+            if not trade:
+                return
+            now_epoch = time.monotonic()
+            last_attempt = self._as_float(trade.get("last_modify_attempt_epoch")) or 0.0
+            if now_epoch - last_attempt < 2.0:
+                return
+            trade["last_modify_attempt_epoch"] = now_epoch
+            symbol = str(trade.get("symbol") or "").strip()
+            side = str(trade.get("side") or "").strip().upper()
+            qty = max(int(self._as_int(trade.get("quantity")) or 1), 1)
+            entry_order_id = str(trade.get("entry_order_id") or "").strip()
+            tick = self._last_tick_by_symbol.get(symbol) or {}
+            bid = self._as_float(tick.get("bid_price"))
+            ask = self._as_float(tick.get("ask_price"))
+            ltp = self._as_float(tick.get("ltp"))
+            prev_price = self._as_float(trade.get("last_modified_price")) or self._as_float(
+                trade.get("entry_price")
+            )
+
+        if not entry_order_id or side not in {"BUY", "SELL"}:
+            return
+        desired = ask if side == "BUY" else bid
+        if desired is None or desired <= 0:
+            desired = ltp
+        if desired is None or desired <= 0:
+            return
+        desired = round(float(desired), 2)
+        if prev_price is not None and abs(float(prev_price) - desired) < 0.01:
+            return
+
+        payload = {
+            "id": entry_order_id,
+            "type": 1,
+            "qty": qty,
+            "limitPrice": desired,
+            "stopPrice": 0,
+        }
+        try:
+            response = client.modify_order(data=payload)
+        except TypeError:
+            response = client.modify_order(payload)
+        except Exception as exc:  # noqa: BLE001
+            self._append_order_log(
+                action="modify_entry",
+                symbol=symbol,
+                side=side,
+                status="error",
+                request_payload=payload,
+                response_payload={"error": str(exc)},
+                message="modify_order failed",
+            )
+            return
+
+        now_txt = datetime.now(IST_ZONE).strftime("%Y-%m-%d %H:%M:%S")
+        with self._lock:
+            cur = self._managed_trades.get(trade_id)
+            if cur:
+                cur["entry_price"] = desired
+                cur["updated_at"] = now_txt
+                cur["last_modified_price"] = desired
+        self._append_order_log(
+            action="modify_entry",
+            symbol=symbol,
+            side=side,
+            status="ok",
+            request_payload=payload,
+            response_payload=response,
+            message=f"entry_order_id={entry_order_id}",
+        )
 
     def _persist_shortlist_state_nolock(self) -> None:
         want = shortlist_session_date_ist()
