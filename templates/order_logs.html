@@ -1,0 +1,202 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>RiverFlowScanner - Order Logs</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+</head>
+<body>
+    <div class="scanner-app">
+        <header class="scanner-header">
+            <div class="scanner-header-left">
+                <h1 class="scanner-title">RiverFlowScanner</h1>
+            </div>
+            <div class="live-pill {% if settings.is_started %}on{% endif %}" id="live-pill" aria-live="polite">
+                <span class="dot" aria-hidden="true"></span>
+                <span id="live-pill-text">{% if settings.is_started %}Live{% else %}Idle{% endif %}</span>
+            </div>
+        </header>
+
+        <div class="scanner-toolbar">
+            <form method="post" action="{{ url_for('home') }}" style="margin:0;">
+                <button class="toolbar-btn toolbar-btn-start" type="submit" name="action" value="start_scanner" {% if settings.is_started %}disabled{% endif %}>Start</button>
+            </form>
+            <form method="post" action="{{ url_for('home') }}" style="margin:0;">
+                <button class="toolbar-btn toolbar-btn-stop" type="submit" name="action" value="stop_scanner" {% if not settings.is_started %}disabled{% endif %}>Stop</button>
+            </form>
+            <a class="toolbar-btn toolbar-btn-orderlog toolbar-link-btn active" href="{{ url_for('order_logs_dashboard') }}">Order Logs</a>
+            <div class="nav-pill">
+                <a href="{{ url_for('home') }}">Scanner</a>
+                <a href="{{ url_for('watchlist_dashboard') }}">Watchlist</a>
+                <a href="{{ url_for('all_stocks_dashboard') }}">All Stocks</a>
+                <a href="{{ url_for('home') }}" class="nav-pill-btn nav-settings-btn">Settings</a>
+            </div>
+        </div>
+
+        <div class="panel-block">
+            <div class="panel-block-header order-log-head">
+                <span>Order Logs</span>
+                <div class="order-log-controls">
+                    <select id="order-log-filter">
+                        <option value="today" selected>Today</option>
+                        <option value="all">All Logs</option>
+                        <option value="custom">Custom Date</option>
+                    </select>
+                    <input type="date" id="order-log-date">
+                    <button type="button" class="btn-secondary order-log-apply" id="order-log-apply">Apply</button>
+                </div>
+            </div>
+            <div class="scanner-table-wrap positions-wrap">
+                <table class="data-table">
+                    <thead>
+                        <tr>
+                            <th>Time</th>
+                            <th>Action</th>
+                            <th>Symbol</th>
+                            <th>Side</th>
+                            <th>Status</th>
+                            <th>View</th>
+                        </tr>
+                    </thead>
+                    <tbody id="order-log-body">
+                        <tr><td colspan="6" class="empty-row">No order logs for selected filter.</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal-backdrop" id="order-log-modal" role="dialog" aria-modal="true" aria-labelledby="order-log-modal-title">
+        <div class="modal-panel">
+            <div class="modal-head">
+                <h2 id="order-log-modal-title">Order Log Detail</h2>
+                <button type="button" class="modal-close" id="close-order-log" aria-label="Close">&times;</button>
+            </div>
+            <div class="modal-body">
+                <pre id="order-log-json" class="order-log-json">--</pre>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const livePill = document.getElementById("live-pill");
+        const livePillText = document.getElementById("live-pill-text");
+        const orderLogBody = document.getElementById("order-log-body");
+        const orderLogFilter = document.getElementById("order-log-filter");
+        const orderLogDate = document.getElementById("order-log-date");
+        const orderLogApply = document.getElementById("order-log-apply");
+        const orderLogModal = document.getElementById("order-log-modal");
+        const closeOrderLog = document.getElementById("close-order-log");
+        const orderLogJson = document.getElementById("order-log-json");
+
+        const openOrderLogModal = () => orderLogModal?.classList.add("open");
+        const closeOrderLogModal = () => orderLogModal?.classList.remove("open");
+
+        closeOrderLog?.addEventListener("click", closeOrderLogModal);
+        orderLogModal?.addEventListener("click", (e) => {
+            if (e.target === orderLogModal) closeOrderLogModal();
+        });
+        document.addEventListener("keydown", (e) => {
+            if (e.key === "Escape") closeOrderLogModal();
+        });
+
+        const timeOnly = (value) => {
+            const t = String(value ?? "").trim();
+            if (!t) return "-";
+            const parts = t.split(" ");
+            return parts.length > 1 ? parts[parts.length - 1] : t;
+        };
+
+        const renderOrderLogs = (rows) => {
+            if (!orderLogBody) return;
+            const data = rows || [];
+            if (!data.length) {
+                orderLogBody.innerHTML = '<tr><td colspan="6" class="empty-row">No order logs for selected filter.</td></tr>';
+                return;
+            }
+            orderLogBody.innerHTML = data.map((log) => {
+                const payload = encodeURIComponent(JSON.stringify(log || {}, null, 2));
+                const status = String(log.status || "-");
+                return `<tr>
+                    <td>${timeOnly(log.created_at)}</td>
+                    <td>${log.action ?? "-"}</td>
+                    <td>${log.symbol ?? "-"}</td>
+                    <td>${log.side ?? "-"}</td>
+                    <td class="${status === "ok" ? "pnl-pos" : "pnl-neg"}">${status}</td>
+                    <td><button type="button" class="btn-secondary view-log-btn" data-payload="${payload}">View</button></td>
+                </tr>`;
+            }).join("");
+        };
+
+        const refreshOrderLogs = async () => {
+            try {
+                const filter = String(orderLogFilter?.value || "today");
+                const params = new URLSearchParams({ filter });
+                if (filter === "custom" && orderLogDate?.value) {
+                    params.set("date", orderLogDate.value);
+                }
+                const resp = await fetch(`/api/order-logs?${params.toString()}`, { cache: "no-store" });
+                if (!resp.ok) return;
+                const data = await resp.json();
+                renderOrderLogs(data.rows || []);
+            } catch (_) {}
+        };
+
+        orderLogApply?.addEventListener("click", refreshOrderLogs);
+        orderLogFilter?.addEventListener("change", () => {
+            if (orderLogFilter.value !== "custom" && orderLogDate) {
+                orderLogDate.value = "";
+            }
+            refreshOrderLogs();
+        });
+        orderLogDate?.addEventListener("change", () => {
+            if (orderLogFilter?.value === "custom") refreshOrderLogs();
+        });
+
+        if (orderLogDate) {
+            const now = new Date();
+            orderLogDate.value = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+        }
+
+        orderLogBody?.addEventListener("click", (e) => {
+            const btn = e.target.closest("button.view-log-btn");
+            if (!btn) return;
+            const payload = decodeURIComponent(String(btn.dataset.payload || ""));
+            if (orderLogJson) orderLogJson.textContent = payload || "--";
+            openOrderLogModal();
+        });
+
+        const pollStatus = async () => {
+            try {
+                const resp = await fetch("/api/dashboard-data", { cache: "no-store" });
+                if (!resp.ok) return;
+                const data = await resp.json();
+                if (livePill && livePillText) {
+                    if (data.is_started) {
+                        livePill.classList.add("on");
+                        livePillText.textContent = "Live";
+                    } else {
+                        livePill.classList.remove("on");
+                        livePillText.textContent = "Idle";
+                    }
+                }
+                document.querySelectorAll('button[name="action"][value="start_scanner"]').forEach((b) => {
+                    b.disabled = !!data.is_started;
+                });
+                document.querySelectorAll('button[name="action"][value="stop_scanner"]').forEach((b) => {
+                    b.disabled = !data.is_started;
+                });
+            } catch (_) {}
+        };
+
+        pollStatus();
+        refreshOrderLogs();
+        setInterval(pollStatus, 1000);
+        setInterval(refreshOrderLogs, 1000);
+    </script>
+</body>
+</html>

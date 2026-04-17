@@ -161,6 +161,23 @@ a:hover { color: var(--accent); }
     color: #fff;
 }
 .toolbar-btn-stop:hover:not(:disabled) { background: var(--stop-hover); }
+.toolbar-link-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    text-decoration: none;
+}
+.toolbar-btn-orderlog {
+    background: #3a5ea8;
+    color: #fff;
+}
+.toolbar-btn-orderlog:hover {
+    background: #456fc2;
+}
+.toolbar-btn-orderlog.active {
+    background: #4f7dd6;
+    border: 1px solid #7ea2e8;
+}
 .toolbar-btn-settings {
     background: var(--brown-800);
     color: #fff;

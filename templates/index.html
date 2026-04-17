@@ -28,6 +28,7 @@
             <form method="post" style="margin:0;">
                 <button class="toolbar-btn toolbar-btn-stop" type="submit" name="action" value="stop_scanner" {% if not settings.is_started %}disabled{% endif %}>Stop</button>
             </form>
+            <a class="toolbar-btn toolbar-btn-orderlog toolbar-link-btn" href="{{ url_for('order_logs_dashboard') }}">Order Logs</a>
             <div class="nav-pill">
                 <a href="{{ url_for('home') }}" class="active">Scanner</a>
                 <a href="{{ url_for('watchlist_dashboard') }}">Watchlist</a>
@@ -112,37 +113,6 @@
                         </thead>
                         <tbody id="positions-table-body">
                             <tr><td colspan="7" class="empty-row">No open positions.</td></tr>
-                        </tbody>
-                    </table>
-                </div>
-            </div>
-            <div class="panel-block">
-                <div class="panel-block-header order-log-head">
-                    <span>Order Logs</span>
-                    <div class="order-log-controls">
-                        <select id="order-log-filter">
-                            <option value="today" selected>Today</option>
-                            <option value="all">All Logs</option>
-                            <option value="custom">Custom Date</option>
-                        </select>
-                        <input type="date" id="order-log-date">
-                        <button type="button" class="btn-secondary order-log-apply" id="order-log-apply">Apply</button>
-                    </div>
-                </div>
-                <div class="scanner-table-wrap positions-wrap">
-                    <table class="data-table">
-                        <thead>
-                            <tr>
-                                <th>Time</th>
-                                <th>Action</th>
-                                <th>Symbol</th>
-                                <th>Side</th>
-                                <th>Status</th>
-                                <th>View</th>
-                            </tr>
-                        </thead>
-                        <tbody id="order-log-body">
-                            <tr><td colspan="6" class="empty-row">No order logs for selected filter.</td></tr>
                         </tbody>
                     </table>
                 </div>
@@ -281,18 +251,6 @@
         </div>
     </div>
 
-    <div class="modal-backdrop" id="order-log-modal" role="dialog" aria-modal="true" aria-labelledby="order-log-modal-title">
-        <div class="modal-panel">
-            <div class="modal-head">
-                <h2 id="order-log-modal-title">Order Log Detail</h2>
-                <button type="button" class="modal-close" id="close-order-log" aria-label="Close">&times;</button>
-            </div>
-            <div class="modal-body">
-                <pre id="order-log-json" class="order-log-json">--</pre>
-            </div>
-        </div>
-    </div>
-
     <script>
         const symbolSearchInput = document.getElementById("symbol-search-input");
         const symbolSearchBtn = document.getElementById("symbol-search-btn");
@@ -325,13 +283,6 @@
         const tradeRiskPerShare = document.getElementById("trade-risk-per-share");
         const tradeSuggestedQty = document.getElementById("trade-suggested-qty");
         const positionsBody = document.getElementById("positions-table-body");
-        const orderLogBody = document.getElementById("order-log-body");
-        const orderLogFilter = document.getElementById("order-log-filter");
-        const orderLogDate = document.getElementById("order-log-date");
-        const orderLogApply = document.getElementById("order-log-apply");
-        const orderLogModal = document.getElementById("order-log-modal");
-        const closeOrderLog = document.getElementById("close-order-log");
-        const orderLogJson = document.getElementById("order-log-json");
         const activeTrade = { symbol: "", ltp: null, upperCircuit: null, lowerCircuit: null };
 
         const applyScannerSymbolFilter = () => {
@@ -367,29 +318,22 @@
         const closeSettingsModal = () => settingsModal?.classList.remove("open");
         const openTradeModal = () => tradeModal?.classList.add("open");
         const closeTradeModal = () => tradeModal?.classList.remove("open");
-        const openOrderLogModal = () => orderLogModal?.classList.add("open");
-        const closeOrderLogModal = () => orderLogModal?.classList.remove("open");
 
         openSettings?.addEventListener("click", openSettingsModal);
         closeSettings?.addEventListener("click", closeSettingsModal);
         closeSettings2?.addEventListener("click", closeSettingsModal);
         closeTrade?.addEventListener("click", closeTradeModal);
         closeTrade2?.addEventListener("click", closeTradeModal);
-        closeOrderLog?.addEventListener("click", closeOrderLogModal);
         settingsModal?.addEventListener("click", (e) => {
             if (e.target === settingsModal) closeSettingsModal();
         });
         tradeModal?.addEventListener("click", (e) => {
             if (e.target === tradeModal) closeTradeModal();
         });
-        orderLogModal?.addEventListener("click", (e) => {
-            if (e.target === orderLogModal) closeOrderLogModal();
-        });
         document.addEventListener("keydown", (e) => {
             if (e.key === "Escape") {
                 closeSettingsModal();
                 closeTradeModal();
-                closeOrderLogModal();
             }
         });
 
@@ -619,56 +563,6 @@
             }).join("");
         };
 
-        const renderOrderLogs = (rows) => {
-            if (!orderLogBody) return;
-            const data = rows || [];
-            if (!data.length) {
-                orderLogBody.innerHTML = '<tr><td colspan="6" class="empty-row">No order logs for selected filter.</td></tr>';
-                return;
-            }
-            orderLogBody.innerHTML = data.map((log) => {
-                const payload = encodeURIComponent(JSON.stringify(log || {}, null, 2));
-                const status = String(log.status || "-");
-                return `<tr>
-                    <td>${timeOnly(log.created_at)}</td>
-                    <td>${log.action ?? "-"}</td>
-                    <td>${log.symbol ?? "-"}</td>
-                    <td>${log.side ?? "-"}</td>
-                    <td class="${status === "ok" ? "pnl-pos" : "pnl-neg"}">${status}</td>
-                    <td><button type="button" class="btn-secondary view-log-btn" data-payload="${payload}">View</button></td>
-                </tr>`;
-            }).join("");
-        };
-
-        const refreshOrderLogs = async () => {
-            try {
-                const filter = String(orderLogFilter?.value || "today");
-                const params = new URLSearchParams({ filter });
-                if (filter === "custom" && orderLogDate?.value) {
-                    params.set("date", orderLogDate.value);
-                }
-                const resp = await fetch(`/api/order-logs?${params.toString()}`, { cache: "no-store" });
-                if (!resp.ok) return;
-                const data = await resp.json();
-                renderOrderLogs(data.rows || []);
-            } catch (_) {}
-        };
-
-        orderLogApply?.addEventListener("click", refreshOrderLogs);
-        orderLogFilter?.addEventListener("change", () => {
-            if (orderLogFilter.value !== "custom" && orderLogDate) {
-                orderLogDate.value = "";
-            }
-            refreshOrderLogs();
-        });
-        orderLogDate?.addEventListener("change", () => {
-            if (orderLogFilter?.value === "custom") refreshOrderLogs();
-        });
-        if (orderLogDate) {
-            const now = new Date();
-            orderLogDate.value = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
-        }
-
         positionsBody?.addEventListener("click", async (e) => {
             const btn = e.target.closest("button.exit-pos-btn");
             if (!btn) return;
@@ -685,14 +579,6 @@
             } finally {
                 btn.disabled = false;
             }
-        });
-
-        orderLogBody?.addEventListener("click", (e) => {
-            const btn = e.target.closest("button.view-log-btn");
-            if (!btn) return;
-            const payload = decodeURIComponent(String(btn.dataset.payload || ""));
-            if (orderLogJson) orderLogJson.textContent = payload || "--";
-            openOrderLogModal();
         });
 
         const pollDashboardData = async () => {
@@ -728,9 +614,7 @@
         };
 
         pollDashboardData();
-        refreshOrderLogs();
         setInterval(pollDashboardData, 1000);
-        setInterval(refreshOrderLogs, 1000);
         setInterval(() => {
             if (tradeModal?.classList.contains("open")) refreshActiveTradeLtp();
         }, 1000);

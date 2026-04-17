@@ -236,6 +236,16 @@ def all_stocks_dashboard():
     )
 
 
+@app.route("/order-logs", methods=["GET"])
+def order_logs_dashboard():
+    status = ENGINE.snapshot()
+    RUNTIME_SETTINGS["is_started"] = status.is_running
+    return render_template(
+        "order_logs.html",
+        settings=RUNTIME_SETTINGS,
+    )
+
+
 @app.route("/sample-data", methods=["GET"])
 def sample_data():
     status = ENGINE.snapshot()

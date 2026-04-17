@@ -28,6 +28,7 @@
             <form method="post" action="{{ url_for('home') }}" style="margin:0;">
                 <button class="toolbar-btn toolbar-btn-stop" type="submit" name="action" value="stop_scanner" {% if not settings.is_started %}disabled{% endif %}>Stop</button>
             </form>
+            <a class="toolbar-btn toolbar-btn-orderlog toolbar-link-btn" href="{{ url_for('order_logs_dashboard') }}">Order Logs</a>
             <div class="nav-pill">
                 <a href="{{ url_for('home') }}">Scanner</a>
                 <a href="{{ url_for('watchlist_dashboard') }}" class="active">Watchlist</a>
