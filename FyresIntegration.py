@@ -70,23 +70,49 @@ def automated_login(client_id,secret_key,FY_ID,TOTP_KEY,PIN,redirect_uri):
 
     global fyers,access_token
 
+    def _split_client_id(value: str) -> tuple[str, str]:
+        raw = str(value or "").strip()
+        if "-" in raw:
+            app_id, app_type = raw.rsplit("-", 1)
+            return app_id.strip(), app_type.strip()
+        return raw, "100"
+
+    def _require_ok(payload: dict, step_name: str, required_keys: list[str] | None = None) -> None:
+        if not isinstance(payload, dict):
+            raise RuntimeError(f"{step_name} failed: invalid response type")
+        if str(payload.get("s", "")).lower() != "ok":
+            msg = payload.get("message") or payload.get("error") or payload
+            code = payload.get("code")
+            raise RuntimeError(f"{step_name} failed (code={code}): {msg}")
+        if required_keys:
+            for key in required_keys:
+                if key not in payload:
+                    raise RuntimeError(f"{step_name} failed: missing key '{key}' in response")
+
+    app_id, app_type = _split_client_id(client_id)
+
     URL_SEND_LOGIN_OTP = "https://api-t2.fyers.in/vagator/v2/send_login_otp_v2"
     response = requests.post(url=URL_SEND_LOGIN_OTP, json={"fy_id": getEncodedString(FY_ID), "app_id": "2"})
     print("Status code:", response.status_code)
     print("Raw text:", response.text)
     res = response.json()
+    _require_ok(res, "send_login_otp_v2", required_keys=["request_key"])
 
     if datetime.now().second % 30 > 27: sleep(5)
     URL_VERIFY_OTP = "https://api-t2.fyers.in/vagator/v2/verify_otp"
     res2 = requests.post(url=URL_VERIFY_OTP,
                          json={"request_key": res["request_key"], "otp": pyotp.TOTP(TOTP_KEY).now()}).json()
     print(res2)
+    _require_ok(res2, "verify_otp", required_keys=["request_key"])
 
     ses = requests.Session()
     URL_VERIFY_OTP2 = "https://api-t2.fyers.in/vagator/v2/verify_pin_v2"
     payload2 = {"request_key": res2["request_key"], "identity_type": "pin", "identifier": getEncodedString(PIN)}
     res3 = ses.post(url=URL_VERIFY_OTP2, json=payload2).json()
     print("res3: ",res3)
+    _require_ok(res3, "verify_pin_v2", required_keys=["data"])
+    if not isinstance(res3.get("data"), dict) or "access_token" not in res3["data"]:
+        raise RuntimeError("verify_pin_v2 failed: access_token missing in data")
 
     ses.headers.update({
         'authorization': f"Bearer {res3['data']['access_token']}"
@@ -94,16 +120,22 @@ def automated_login(client_id,secret_key,FY_ID,TOTP_KEY,PIN,redirect_uri):
 
     TOKENURL = "https://api-t1.fyers.in/api/v3/token"
     payload3 = {"fyers_id": FY_ID,
-                "app_id": client_id[:-4],
+                "app_id": app_id,
                 "redirect_uri": redirect_uri,
-                "appType": "100", "code_challenge": "",
+                "appType": app_type, "code_challenge": "",
                 "state": "None", "scope": "", "nonce": "", "response_type": "code", "create_cookie": True}
 
-    res3 = ses.post(url=TOKENURL, json=payload3).json()
-    print("res3: ",res3)
-    url = res3['Url']
+    token_resp = ses.post(url=TOKENURL, json=payload3).json()
+    print("res3: ",token_resp)
+    _require_ok(token_resp, "api/v3/token")
+    url = token_resp.get("Url") or token_resp.get("url")
+    if not url:
+        raise RuntimeError(f"api/v3/token failed: Url missing in response: {token_resp}")
     parsed = urlparse(url)
-    auth_code = parse_qs(parsed.query)['auth_code'][0]
+    auth_values = parse_qs(parsed.query).get("auth_code") or []
+    if not auth_values:
+        raise RuntimeError(f"api/v3/token failed: auth_code missing in redirect Url: {url}")
+    auth_code = auth_values[0]
     grant_type = "authorization_code"
 
     response_type = "code"
@@ -117,10 +149,19 @@ def automated_login(client_id,secret_key,FY_ID,TOTP_KEY,PIN,redirect_uri):
     )
     session.set_token(auth_code)
     response = session.generate_token()
+    _require_ok(response, "generate_token", required_keys=["access_token"])
     access_token = response['access_token']
     print("access_token: ",access_token)
     fyers = fyersModel.FyersModel(client_id=client_id, is_async=False, token=access_token, log_path=os.getcwd())
-    print(fyers.get_profile())
+    profile = fyers.get_profile()
+    print(profile)
+    return {
+        "fyers": fyers,
+        "access_token": access_token,
+        "profile": profile,
+        "client_id": client_id,
+        "fy_id": FY_ID,
+    }
 
 def get_ltp(SYMBOL):
     global fyers
