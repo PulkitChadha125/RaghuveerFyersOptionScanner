@@ -11,13 +11,17 @@ Optional:
 
 from __future__ import annotations
 
+import json
 import os
 import urllib.parse
+from pathlib import Path
 from typing import Any
 
 import requests
 
 TELEGRAM_API = "https://api.telegram.org"
+BASE_DIR = Path(__file__).resolve().parent
+DEFAULT_CONFIG_PATH = BASE_DIR / "telegram_config.json"
 
 
 def _env_bool(name: str, default: bool = True) -> bool:
@@ -27,9 +31,64 @@ def _env_bool(name: str, default: bool = True) -> bool:
     return raw not in {"0", "false", "no", "off"}
 
 
+def _read_telegram_config() -> dict[str, Any]:
+    """
+    Read telegram config from JSON file.
+    Path order:
+      1) TELEGRAM_CONFIG_PATH env var (if set)
+      2) ./telegram_config.json (project root)
+    """
+    cfg_path_raw = (os.environ.get("TELEGRAM_CONFIG_PATH") or "").strip()
+    cfg_path = Path(cfg_path_raw) if cfg_path_raw else DEFAULT_CONFIG_PATH
+    try:
+        if not cfg_path.exists():
+            return {}
+        data = json.loads(cfg_path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception as exc:  # noqa: BLE001
+        print(f"[telegram] failed to read config {cfg_path}: {exc}")
+        return {}
+
+
+def _coalesce_str(*values: Any) -> str:
+    for value in values:
+        text = str(value or "").strip()
+        if text:
+            return text
+    return ""
+
+
+def _resolve_token_and_chat_id() -> tuple[str, str]:
+    cfg = _read_telegram_config()
+    # Environment variables take precedence over file values.
+    token = _coalesce_str(
+        os.environ.get("TELEGRAM_BOT_TOKEN"),
+        cfg.get("bot_token"),
+        cfg.get("token"),
+    )
+    chat_id = _coalesce_str(
+        os.environ.get("TELEGRAM_CHAT_ID"),
+        cfg.get("chat_id"),
+        cfg.get("group_chat_id"),
+    )
+    return token, chat_id
+
+
+def _is_enabled() -> bool:
+    cfg = _read_telegram_config()
+    enabled_env = (os.environ.get("TELEGRAM_ENABLED") or "").strip()
+    if enabled_env:
+        return _env_bool("TELEGRAM_ENABLED", default=True)
+    enabled_cfg = cfg.get("enabled")
+    if isinstance(enabled_cfg, bool):
+        return enabled_cfg
+    if enabled_cfg is not None:
+        return str(enabled_cfg).strip().lower() not in {"0", "false", "no", "off"}
+    return True
+
+
 def is_telegram_configured() -> bool:
-    token = (os.environ.get("TELEGRAM_BOT_TOKEN") or "").strip()
-    chat = (os.environ.get("TELEGRAM_CHAT_ID") or "").strip()
+    token, chat = _resolve_token_and_chat_id()
     return bool(token and chat)
 
 
@@ -91,13 +150,12 @@ def send_shortlist_alert(row: dict[str, Any]) -> bool:
     Send one Telegram message for a new scanner shortlist row.
     Returns True if sent (or skipped as disabled), False on hard failure after logging.
     """
-    if not _env_bool("TELEGRAM_ENABLED", default=True):
+    if not _is_enabled():
         return True
     if not is_telegram_configured():
         return True
 
-    token = os.environ["TELEGRAM_BOT_TOKEN"].strip()
-    chat_id = os.environ["TELEGRAM_CHAT_ID"].strip()
+    token, chat_id = _resolve_token_and_chat_id()
     url = f"{TELEGRAM_API}/bot{token}/sendMessage"
     payload = {
         "chat_id": chat_id,

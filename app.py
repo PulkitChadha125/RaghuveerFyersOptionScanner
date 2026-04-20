@@ -3,21 +3,30 @@ from __future__ import annotations
 from pathlib import Path
 import threading
 import webbrowser
+import os
+from functools import wraps
 
 import pandas as pd
-from flask import Flask, jsonify, redirect, render_template, request, url_for
+from flask import Flask, jsonify, redirect, render_template, request, session, url_for
 
 from main import OUTPUT_CSV
 from scanner_engine import BOOTSTRAP_SYMBOL_LIMIT, ENGINE, RATE_LIMIT_COOLDOWN_SECS
 
 app = Flask(__name__)
+app.secret_key = os.environ.get("APP_SECRET_KEY", "riverflow-scanner-local-secret")
 
 BASE_DIR = Path(__file__).resolve().parent
 CSV_PATH = BASE_DIR / OUTPUT_CSV
 
+ALLOWED_USERS = {
+    "Shivrajbhai": "Aa@007575",
+    "Vijaybhai": "vijay@7575",
+}
+
 DEFAULT_SETTINGS = {
     "rule1_volume_multiplier": 30,
     "rule1_sma_period": 1125,
+    "rule2_sma_period": 1125,
     "rule1_value_cr": 4,
     "rule2_volume_multiplier": 10,
     "rule2_value_cr": 6,
@@ -87,7 +96,51 @@ def _latest_unique_rows(
     return out
 
 
+def _is_logged_in() -> bool:
+    return bool(session.get("is_authenticated"))
+
+
+def login_required(fn):
+    @wraps(fn)
+    def wrapped(*args, **kwargs):
+        if _is_logged_in():
+            return fn(*args, **kwargs)
+        if request.path.startswith("/api/"):
+            return jsonify({"ok": False, "error": "authentication required"}), 401
+        next_url = request.path or url_for("home")
+        return redirect(url_for("login_page", next=next_url))
+
+    return wrapped
+
+
+@app.route("/login", methods=["GET", "POST"])
+def login_page():
+    if _is_logged_in():
+        return redirect(url_for("home"))
+    error = ""
+    if request.method == "POST":
+        user_id = str(request.form.get("user_id") or "").strip()
+        password = str(request.form.get("password") or "")
+        expected = ALLOWED_USERS.get(user_id)
+        if expected is not None and password == expected:
+            session["is_authenticated"] = True
+            session["auth_user"] = user_id
+            next_url = str(request.args.get("next") or request.form.get("next") or "").strip()
+            if next_url.startswith("/"):
+                return redirect(next_url)
+            return redirect(url_for("home"))
+        error = "Invalid user id or password."
+    return render_template("login.html", error=error)
+
+
+@app.route("/logout", methods=["POST"])
+def logout():
+    session.clear()
+    return redirect(url_for("login_page"))
+
+
 @app.route("/", methods=["GET", "POST"])
+@login_required
 def home():
     if request.method == "POST":
         action = request.form.get("action", "save_settings")
@@ -125,11 +178,14 @@ def home():
                 RUNTIME_SETTINGS["is_started"] = False
             else:
                 ENGINE.start(
-                    sma_period=RUNTIME_SETTINGS["rule1_sma_period"],
+                    sma_period_rule1=RUNTIME_SETTINGS["rule1_sma_period"],
+                    sma_period_rule2=RUNTIME_SETTINGS["rule2_sma_period"],
                     scan_config={
                         "rule1_volume_multiplier": RUNTIME_SETTINGS["rule1_volume_multiplier"],
+                        "rule1_sma_period": RUNTIME_SETTINGS["rule1_sma_period"],
                         "rule1_value_cr": RUNTIME_SETTINGS["rule1_value_cr"],
                         "rule2_volume_multiplier": RUNTIME_SETTINGS["rule2_volume_multiplier"],
+                        "rule2_sma_period": RUNTIME_SETTINGS["rule2_sma_period"],
                         "rule2_value_cr": RUNTIME_SETTINGS["rule2_value_cr"],
                         "metric_source": RUNTIME_SETTINGS["metric_source"],
                         "watchlist": RUNTIME_SETTINGS["watchlist"],
@@ -141,11 +197,14 @@ def home():
         if action == "start_scanner":
             if not RUNTIME_SETTINGS["is_started"]:
                 ENGINE.start(
-                    sma_period=RUNTIME_SETTINGS["rule1_sma_period"],
+                    sma_period_rule1=RUNTIME_SETTINGS["rule1_sma_period"],
+                    sma_period_rule2=RUNTIME_SETTINGS["rule2_sma_period"],
                     scan_config={
                         "rule1_volume_multiplier": RUNTIME_SETTINGS["rule1_volume_multiplier"],
+                        "rule1_sma_period": RUNTIME_SETTINGS["rule1_sma_period"],
                         "rule1_value_cr": RUNTIME_SETTINGS["rule1_value_cr"],
                         "rule2_volume_multiplier": RUNTIME_SETTINGS["rule2_volume_multiplier"],
+                        "rule2_sma_period": RUNTIME_SETTINGS["rule2_sma_period"],
                         "rule2_value_cr": RUNTIME_SETTINGS["rule2_value_cr"],
                         "metric_source": RUNTIME_SETTINGS["metric_source"],
                         "watchlist": RUNTIME_SETTINGS["watchlist"],
@@ -159,6 +218,9 @@ def home():
         )
         RUNTIME_SETTINGS["rule1_sma_period"] = parse_int(
             "rule1_sma_period", RUNTIME_SETTINGS["rule1_sma_period"]
+        )
+        RUNTIME_SETTINGS["rule2_sma_period"] = parse_int(
+            "rule2_sma_period", RUNTIME_SETTINGS["rule2_sma_period"]
         )
         RUNTIME_SETTINGS["rule1_value_cr"] = parse_int(
             "rule1_value_cr", RUNTIME_SETTINGS["rule1_value_cr"]
@@ -177,8 +239,10 @@ def home():
         ENGINE.update_scan_config(
             {
                 "rule1_volume_multiplier": RUNTIME_SETTINGS["rule1_volume_multiplier"],
+                "rule1_sma_period": RUNTIME_SETTINGS["rule1_sma_period"],
                 "rule1_value_cr": RUNTIME_SETTINGS["rule1_value_cr"],
                 "rule2_volume_multiplier": RUNTIME_SETTINGS["rule2_volume_multiplier"],
+                "rule2_sma_period": RUNTIME_SETTINGS["rule2_sma_period"],
                 "rule2_value_cr": RUNTIME_SETTINGS["rule2_value_cr"],
                 "metric_source": RUNTIME_SETTINGS["metric_source"],
                 "watchlist": RUNTIME_SETTINGS["watchlist"],
@@ -209,6 +273,7 @@ def home():
 
 
 @app.route("/watchlist", methods=["GET"])
+@login_required
 def watchlist_dashboard():
     status = ENGINE.snapshot()
     RUNTIME_SETTINGS["is_started"] = status.is_running
@@ -225,6 +290,7 @@ def watchlist_dashboard():
 
 
 @app.route("/all-stocks", methods=["GET"])
+@login_required
 def all_stocks_dashboard():
     status = ENGINE.snapshot()
     RUNTIME_SETTINGS["is_started"] = status.is_running
@@ -237,6 +303,7 @@ def all_stocks_dashboard():
 
 
 @app.route("/order-logs", methods=["GET"])
+@login_required
 def order_logs_dashboard():
     status = ENGINE.snapshot()
     RUNTIME_SETTINGS["is_started"] = status.is_running
@@ -247,6 +314,7 @@ def order_logs_dashboard():
 
 
 @app.route("/sample-data", methods=["GET"])
+@login_required
 def sample_data():
     status = ENGINE.snapshot()
     RUNTIME_SETTINGS["is_started"] = status.is_running
@@ -264,6 +332,7 @@ def sample_data():
 
 
 @app.route("/api/dashboard-data", methods=["GET"])
+@login_required
 def dashboard_data():
     status = ENGINE.snapshot()
     all_symbols = list(status.shortlisted_rows)
@@ -289,6 +358,7 @@ def dashboard_data():
 
 
 @app.route("/api/watchlist-data", methods=["GET"])
+@login_required
 def watchlist_data_api():
     status = ENGINE.snapshot()
     all_symbols = list(status.shortlisted_rows)
@@ -304,6 +374,7 @@ def watchlist_data_api():
 
 
 @app.route("/api/order-logs", methods=["GET"])
+@login_required
 def order_logs_api():
     filter_mode = str(request.args.get("filter", "today") or "today").strip().lower()
     custom_date = str(request.args.get("date", "") or "").strip()
@@ -312,6 +383,7 @@ def order_logs_api():
 
 
 @app.route("/api/symbol-ltp", methods=["GET"])
+@login_required
 def symbol_ltp_api():
     symbol = str(request.args.get("symbol", "")).strip()
     if not symbol:
@@ -339,6 +411,7 @@ def symbol_ltp_api():
 
 
 @app.route("/api/sample-data", methods=["GET"])
+@login_required
 def sample_data_api():
     since_seq_raw = request.args.get("since_seq", "0").strip()
     since_minute = request.args.get("since_minute", "").strip()
@@ -362,6 +435,7 @@ def sample_data_api():
 
 
 @app.route("/api/place-order", methods=["POST"])
+@login_required
 def place_order_api():
     payload = request.get_json(silent=True) or {}
     symbol = str(payload.get("symbol") or "").strip()
@@ -397,6 +471,7 @@ def place_order_api():
 
 
 @app.route("/api/exit-position", methods=["POST"])
+@login_required
 def exit_position_api():
     payload = request.get_json(silent=True) or {}
     symbol = str(payload.get("symbol") or "").strip()

@@ -60,9 +60,17 @@ Copy that number — this is your **`TELEGRAM_CHAT_ID`**.
 
 ---
 
-## Step 4 — Set environment variables on your PC
+## Step 4 — Configure credentials (ENV or config file)
 
-The scanner reads **environment variables** (not the CSV file) for Telegram.
+The scanner supports **both** methods now:
+
+- Environment variables (recommended for production)
+- Local config file `telegram_config.json` (useful on server if env is not mapped)
+
+Priority order is:
+
+1. `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` from environment
+2. `bot_token` / `chat_id` from `telegram_config.json`
 
 | Variable | Required | Meaning |
 |----------|----------|---------|
@@ -87,6 +95,28 @@ Then start your app from **the same** PowerShell window.
    - Name: `TELEGRAM_BOT_TOKEN`, Value: your token  
    - Name: `TELEGRAM_CHAT_ID`, Value: your group id  
 4. OK out, then **fully restart** Cursor / terminal / Python so new values load.
+
+### Config file method (works well on server)
+
+1. In project root, copy `telegram_config.example.json` to:
+   - `telegram_config.json`
+2. Edit `telegram_config.json`:
+
+```json
+{
+  "enabled": true,
+  "bot_token": "your-real-token",
+  "chat_id": "-5139206302"
+}
+```
+
+3. Restart your scanner service/process.
+
+Optional: use a custom path with env var:
+
+```powershell
+$env:TELEGRAM_CONFIG_PATH = "D:\\path\\to\\telegram_config.json"
+```
 
 ---
 

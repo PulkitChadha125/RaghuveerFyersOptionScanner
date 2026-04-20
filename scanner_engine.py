@@ -186,8 +186,10 @@ class ScannerEngine:
         self._positions_cache_at_monotonic: float = 0.0
         self._scan_config: dict[str, Any] = {
             "rule1_volume_multiplier": 30,
+            "rule1_sma_period": 1125,
             "rule1_value_cr": 4,
             "rule2_volume_multiplier": 10,
+            "rule2_sma_period": 1125,
             "rule2_value_cr": 6,
             "metric_source": "vol_traded_today_delta",
             "watchlist": [],
@@ -209,7 +211,8 @@ class ScannerEngine:
 
     def start(
         self,
-        sma_period: int,
+        sma_period_rule1: int,
+        sma_period_rule2: int | None = None,
         scan_config: dict[str, Any] | None = None,
         websocket_start_at_ist: datetime | None = None,
     ) -> None:
@@ -268,22 +271,24 @@ class ScannerEngine:
             self._eval_run_id = run_id
             if scan_config:
                 self._scan_config.update(scan_config)
+            sma2 = int(sma_period_rule2) if sma_period_rule2 is not None else int(sma_period_rule1)
             self._worker = threading.Thread(
                 target=self._run_pipeline,
-                args=(sma_period, run_id, websocket_start_at_ist),
+                args=(int(sma_period_rule1), sma2, run_id, websocket_start_at_ist),
                 name="scanner-engine",
                 daemon=False,
             )
             self._worker.start()
 
-    def start_daily_scheduler(self, sma_period: int = 1125) -> None:
+    def start_daily_scheduler(self, sma_period_rule1: int = 1125, sma_period_rule2: int | None = None) -> None:
         with self._lock:
             if self._scheduler_thread is not None and self._scheduler_thread.is_alive():
                 return
             self._scheduler_stop_event.clear()
+            sma2 = int(sma_period_rule2) if sma_period_rule2 is not None else int(sma_period_rule1)
             self._scheduler_thread = threading.Thread(
                 target=self._daily_scheduler_loop,
-                args=(sma_period,),
+                args=(int(sma_period_rule1), sma2),
                 name="scanner-daily-scheduler",
                 daemon=True,
             )
@@ -1380,7 +1385,8 @@ class ScannerEngine:
 
     def _run_pipeline(
         self,
-        sma_period: int,
+        sma_period_rule1: int,
+        sma_period_rule2: int,
         run_id: int,
         websocket_start_at_ist: datetime | None = None,
     ) -> None:
@@ -1403,7 +1409,8 @@ class ScannerEngine:
             rows = self._fetch_and_build_snapshots(
                 fyers=fyers,
                 symbols=symbols,
-                sma_period=sma_period,
+                sma_period_rule1=sma_period_rule1,
+                sma_period_rule2=sma_period_rule2,
                 run_id=run_id,
             )
             if not self._is_active(run_id):
@@ -1447,7 +1454,7 @@ class ScannerEngine:
             return all_symbols
         return all_symbols[-BOOTSTRAP_SYMBOL_LIMIT:]
 
-    def _daily_scheduler_loop(self, sma_period: int) -> None:
+    def _daily_scheduler_loop(self, sma_period_rule1: int, sma_period_rule2: int) -> None:
         while not self._scheduler_stop_event.is_set():
             next_prep = self._next_ist_occurrence(
                 hour=AUTO_LOGIN_AND_HISTORY_HOUR_IST,
@@ -1481,7 +1488,11 @@ class ScannerEngine:
                 "Auto start triggered: logging in and fetching historical data now. "
                 f"Websocket will start at {ws_start_at.strftime('%H:%M IST')}."
             )
-            self.start(sma_period=sma_period, websocket_start_at_ist=ws_start_at)
+            self.start(
+                sma_period_rule1=sma_period_rule1,
+                sma_period_rule2=sma_period_rule2,
+                websocket_start_at_ist=ws_start_at,
+            )
 
             while self.status.is_running and not self._scheduler_stop_event.is_set():
                 time.sleep(5)
@@ -1558,13 +1569,15 @@ class ScannerEngine:
         self,
         fyers: Any,
         symbols: list[str],
-        sma_period: int,
+        sma_period_rule1: int,
+        sma_period_rule2: int,
         run_id: int,
     ) -> list[dict[str, Any]]:
         today_ist = pd.Timestamp.now(tz="Asia/Kolkata").date()
-        # Fetch extra calendar days so we reliably get >= sma_period completed 1-min candles.
+        # Fetch extra calendar days so we reliably get >= max(rule SMA period) completed 1-min candles.
+        max_sma_period = max(int(sma_period_rule1), int(sma_period_rule2), 1)
         trading_minutes_per_day = 375
-        days_back = max(14, int(sma_period / trading_minutes_per_day) + 10)
+        days_back = max(14, int(max_sma_period / trading_minutes_per_day) + 10)
         range_from_dt = date.today() - timedelta(days=days_back)
         range_from = range_from_dt.strftime("%Y-%m-%d")
         range_to = today_ist.strftime("%Y-%m-%d")
@@ -1602,36 +1615,45 @@ class ScannerEngine:
                 continue
 
             frame["volume"] = pd.to_numeric(frame["volume"], errors="coerce").fillna(0.0)
-            # Match chart parameter: SMA(length=sma_period) on 1-min volume bars.
-            frame["sma_volume"] = (
-                frame["volume"].rolling(window=sma_period, min_periods=sma_period).mean()
-            )
+            # Independent SMA baselines per rule on 1-min volume bars.
+            frame["sma_volume_rule1"] = frame["volume"].rolling(
+                window=sma_period_rule1, min_periods=sma_period_rule1
+            ).mean()
+            frame["sma_volume_rule2"] = frame["volume"].rolling(
+                window=sma_period_rule2, min_periods=sma_period_rule2
+            ).mean()
 
             # Use latest completed candle (previous trading day close candle).
             last_row = frame.iloc[-1]
-            if pd.isna(last_row["sma_volume"]):
-                # If history is shorter than sma_period, average available completed bars.
+            if pd.isna(last_row["sma_volume_rule1"]):
+                # If history is shorter than configured period, average available completed bars.
                 last_row = last_row.copy()
-                lookback = min(len(frame), max(sma_period, 1))
-                last_row["sma_volume"] = float(frame["volume"].tail(lookback).mean())
+                lookback1 = min(len(frame), max(sma_period_rule1, 1))
+                last_row["sma_volume_rule1"] = float(frame["volume"].tail(lookback1).mean())
+            if pd.isna(last_row["sma_volume_rule2"]):
+                last_row = last_row.copy()
+                lookback2 = min(len(frame), max(sma_period_rule2, 1))
+                last_row["sma_volume_rule2"] = float(frame["volume"].tail(lookback2).mean())
             row_ts = last_row["ts"].strftime("%Y-%m-%d %H:%M:%S")
             row_close = float(last_row["close"])
             row_volume = float(last_row["volume"])
             self._set_message(
                 f"{idx}/{total} {symbol} -> last row {row_ts}, close={row_close}, "
-                f"volume={row_volume}, sma={float(last_row['sma_volume']):.2f}",
+                f"volume={row_volume}, sma1={float(last_row['sma_volume_rule1']):.2f}, "
+                f"sma2={float(last_row['sma_volume_rule2']):.2f}",
                 run_id,
             )
             rows.append(
                 {
                     "symbol_name": symbol,
-                    "sma_value": float(last_row["sma_volume"])
-                    if pd.notna(last_row["sma_volume"])
+                    "sma_value1": float(last_row["sma_volume_rule1"])
+                    if pd.notna(last_row["sma_volume_rule1"])
                     else None,
-                    "sma_period": int(sma_period),
-                    "sma_volume": float(last_row["sma_volume"])
-                    if pd.notna(last_row["sma_volume"])
+                    "sma_period1": int(sma_period_rule1),
+                    "sma_value2": float(last_row["sma_volume_rule2"])
+                    if pd.notna(last_row["sma_volume_rule2"])
                     else None,
+                    "sma_period2": int(sma_period_rule2),
                     "volume_value": float(last_row["volume"]),
                     "timestamp": last_row["ts"].strftime("%Y-%m-%d %H:%M:%S"),
                     "open": float(last_row["open"]),
@@ -1701,9 +1723,10 @@ class ScannerEngine:
                 file_obj,
                 fieldnames=[
                     "symbol_name",
-                    "sma_value",
-                    "sma_period",
-                    "sma_volume",
+                    "sma_value1",
+                    "sma_period1",
+                    "sma_value2",
+                    "sma_period2",
                     "volume_value",
                     "timestamp",
                     "open",
@@ -1722,7 +1745,10 @@ class ScannerEngine:
                 CREATE TABLE IF NOT EXISTS symbol_snapshot (
                     snapshot_date TEXT NOT NULL,
                     symbol_name TEXT NOT NULL,
-                    sma_value REAL,
+                    sma_value1 REAL,
+                    sma_period1 INTEGER,
+                    sma_value2 REAL,
+                    sma_period2 INTEGER,
                     volume_value REAL,
                     timestamp TEXT NOT NULL,
                     open REAL,
@@ -1734,20 +1760,34 @@ class ScannerEngine:
                 )
                 """
             )
+            # Backward-compatible migration for older DBs that only had one SMA column.
+            for alter_sql in (
+                "ALTER TABLE symbol_snapshot ADD COLUMN sma_value1 REAL",
+                "ALTER TABLE symbol_snapshot ADD COLUMN sma_period1 INTEGER",
+                "ALTER TABLE symbol_snapshot ADD COLUMN sma_value2 REAL",
+                "ALTER TABLE symbol_snapshot ADD COLUMN sma_period2 INTEGER",
+            ):
+                try:
+                    conn.execute(alter_sql)
+                except sqlite3.OperationalError:
+                    pass
             snapshot_date = (date.today() - timedelta(days=1)).strftime("%Y-%m-%d")
             created_at = datetime.now().isoformat(timespec="seconds")
             conn.executemany(
                 """
                 INSERT OR REPLACE INTO symbol_snapshot (
-                    snapshot_date, symbol_name, sma_value, volume_value, timestamp,
+                    snapshot_date, symbol_name, sma_value1, sma_period1, sma_value2, sma_period2, volume_value, timestamp,
                     open, high, low, close, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     (
                         snapshot_date,
                         row["symbol_name"],
-                        row["sma_value"],
+                        row["sma_value1"],
+                        row["sma_period1"],
+                        row["sma_value2"],
+                        row["sma_period2"],
                         row["volume_value"],
                         row["timestamp"],
                         row["open"],
@@ -1973,7 +2013,8 @@ class ScannerEngine:
                     ltp = float(tick.get("ltp"))
                 except (TypeError, ValueError):
                     continue
-                sma_value = float(base.get("sma_value") or 0.0)
+                sma_value1 = float(base.get("sma_value1") or 0.0)
+                sma_value2 = float(base.get("sma_value2") or 0.0)
                 base_close = float(base.get("close") or 0.0)
                 raw_ts = tick.get("exch_feed_time") or tick.get("last_traded_time")
                 readable_ts = "--"
@@ -1988,8 +2029,8 @@ class ScannerEngine:
                     readable_ts = str(raw_ts or "--")
 
             value_rupees = diff * ltp
-            condition1 = diff > (rule1_mult * sma_value) and value_rupees > (rule1_value_cr * 1e7)
-            condition2 = diff > (rule2_mult * sma_value) and value_rupees > (rule2_value_cr * 1e7)
+            condition1 = diff > (rule1_mult * sma_value1) and value_rupees > (rule1_value_cr * 1e7)
+            condition2 = diff > (rule2_mult * sma_value2) and value_rupees > (rule2_value_cr * 1e7)
             condition_any = condition1 or condition2
 
             with self._lock:
@@ -2003,7 +2044,14 @@ class ScannerEngine:
                         change_pct = (
                             ((ltp - base_close) / base_close * 100.0) if base_close > 0 else 0.0
                         )
-                        relative_vol = (diff / sma_value) if sma_value > 0 else 0.0
+                        relative_vol1 = (diff / sma_value1) if sma_value1 > 0 else 0.0
+                        relative_vol2 = (diff / sma_value2) if sma_value2 > 0 else 0.0
+                        if condition1 and condition2:
+                            relative_vol = max(relative_vol1, relative_vol2)
+                        elif condition1:
+                            relative_vol = relative_vol1
+                        else:
+                            relative_vol = relative_vol2
                         if condition1 and condition2:
                             condition_tag = "C1+C2"
                         elif condition1:
@@ -2018,6 +2066,8 @@ class ScannerEngine:
                             "metric_value": round(diff, 2),
                             "metric_source": "vol_traded_today_delta",
                             "relative_vol": round(relative_vol, 2),
+                            "relative_vol_rule1": round(relative_vol1, 2),
+                            "relative_vol_rule2": round(relative_vol2, 2),
                             "trade_value_cr": round(value_rupees / 1e7, 3),
                             "condition": condition_tag,
                             "hits": hit_n,
