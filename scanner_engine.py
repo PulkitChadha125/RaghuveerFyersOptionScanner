@@ -191,6 +191,7 @@ class ScannerEngine:
             "rule2_volume_multiplier": 10,
             "rule2_sma_period": 1125,
             "rule2_value_cr": 6,
+            "telegram_notifications_enabled": True,
             "metric_source": "vol_traded_today_delta",
             "watchlist": [],
         }
@@ -318,6 +319,16 @@ class ScannerEngine:
             return int(float(value))
         except (TypeError, ValueError):
             return None
+
+    def _as_bool(self, value: Any, default: bool = True) -> bool:
+        if value is None:
+            return default
+        if isinstance(value, bool):
+            return value
+        text = str(value).strip().lower()
+        if not text:
+            return default
+        return text not in {"0", "false", "no", "off"}
 
     def _extract_order_id(self, response: Any) -> str | None:
         if not isinstance(response, dict):
@@ -2077,12 +2088,15 @@ class ScannerEngine:
                         if len(self._shortlist_events) > SHORTLIST_MAX_EVENTS:
                             self._shortlist_events = self._shortlist_events[-SHORTLIST_MAX_EVENTS:]
                         self._persist_shortlist_state_nolock()
-                        try:
-                            from telegram import send_shortlist_alert
+                        if self._as_bool(
+                            self._scan_config.get("telegram_notifications_enabled", True), default=True
+                        ):
+                            try:
+                                from telegram import send_shortlist_alert
 
-                            send_shortlist_alert(dict(row))
-                        except Exception as exc:  # noqa: BLE001
-                            print(f"[telegram] notify error: {exc}")
+                                send_shortlist_alert(dict(row))
+                            except Exception as exc:  # noqa: BLE001
+                                print(f"[telegram] notify error: {exc}")
                         self._push_event(
                             f"SHORTLISTED {symbol} via {condition_tag} "
                             f"(vtt_diff={diff:.0f}, rel_vol={relative_vol:.2f}x, "

@@ -30,6 +30,7 @@ DEFAULT_SETTINGS = {
     "rule1_value_cr": 4,
     "rule2_volume_multiplier": 10,
     "rule2_value_cr": 6,
+    "telegram_notifications_enabled": True,
     "metric_source": "vol_traded_today_delta",
     "watchlist": [],
     "is_started": False,
@@ -187,6 +188,7 @@ def home():
                         "rule2_volume_multiplier": RUNTIME_SETTINGS["rule2_volume_multiplier"],
                         "rule2_sma_period": RUNTIME_SETTINGS["rule2_sma_period"],
                         "rule2_value_cr": RUNTIME_SETTINGS["rule2_value_cr"],
+                        "telegram_notifications_enabled": RUNTIME_SETTINGS["telegram_notifications_enabled"],
                         "metric_source": RUNTIME_SETTINGS["metric_source"],
                         "watchlist": RUNTIME_SETTINGS["watchlist"],
                     },
@@ -206,6 +208,7 @@ def home():
                         "rule2_volume_multiplier": RUNTIME_SETTINGS["rule2_volume_multiplier"],
                         "rule2_sma_period": RUNTIME_SETTINGS["rule2_sma_period"],
                         "rule2_value_cr": RUNTIME_SETTINGS["rule2_value_cr"],
+                        "telegram_notifications_enabled": RUNTIME_SETTINGS["telegram_notifications_enabled"],
                         "metric_source": RUNTIME_SETTINGS["metric_source"],
                         "watchlist": RUNTIME_SETTINGS["watchlist"],
                     },
@@ -234,6 +237,10 @@ def home():
         RUNTIME_SETTINGS["metric_source"] = request.form.get(
             "metric_source", RUNTIME_SETTINGS["metric_source"]
         )
+        RUNTIME_SETTINGS["telegram_notifications_enabled"] = (
+            str(request.form.get("telegram_notifications_enabled") or "").strip().lower()
+            in {"1", "true", "on", "yes"}
+        )
         if request.form.get("reset_defaults") == "1":
             RUNTIME_SETTINGS.update(DEFAULT_SETTINGS)
         ENGINE.update_scan_config(
@@ -244,6 +251,7 @@ def home():
                 "rule2_volume_multiplier": RUNTIME_SETTINGS["rule2_volume_multiplier"],
                 "rule2_sma_period": RUNTIME_SETTINGS["rule2_sma_period"],
                 "rule2_value_cr": RUNTIME_SETTINGS["rule2_value_cr"],
+                "telegram_notifications_enabled": RUNTIME_SETTINGS["telegram_notifications_enabled"],
                 "metric_source": RUNTIME_SETTINGS["metric_source"],
                 "watchlist": RUNTIME_SETTINGS["watchlist"],
             }

@@ -159,6 +159,16 @@
                         <label for="rule2_sma_period">SMA Period</label>
                         <input type="number" min="1" id="rule2_sma_period" name="rule2_sma_period" value="{{ settings.rule2_sma_period }}" required>
                     </div>
+                    <div class="settings-criteria-row">
+                        <label for="telegram_notifications_enabled">Telegram Alerts</label>
+                        <input
+                            type="checkbox"
+                            id="telegram_notifications_enabled"
+                            name="telegram_notifications_enabled"
+                            value="1"
+                            {% if settings.telegram_notifications_enabled %}checked{% endif %}
+                        >
+                    </div>
                     <div class="modal-actions" style="border-top:none;padding-top:12px;margin-top:8px;">
                         <button type="button" class="btn-secondary" id="close-settings-2">Close</button>
                         <button type="submit" class="btn-primary">Save</button>
