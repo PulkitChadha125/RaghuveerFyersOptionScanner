@@ -356,6 +356,24 @@ class ScannerEngine:
                     return [x for x in nested if isinstance(x, dict)]
         return []
 
+    def _broker_response_error_message(self, response: Any) -> str:
+        """Return broker error text if response indicates failure, else empty string."""
+        if not isinstance(response, dict):
+            return ""
+        s_flag = str(response.get("s") or response.get("status") or "").strip().lower()
+        code_val = self._as_int(response.get("code"))
+        msg = str(response.get("message") or response.get("error") or "").strip()
+        if s_flag == "error":
+            return msg or "broker returned error status"
+        if code_val is not None and code_val < 0:
+            return msg or f"broker error code {code_val}"
+        # Some payloads use success text/status code only.
+        if s_flag in {"", "ok", "success"} and (code_val is None or code_val >= 0):
+            return ""
+        if s_flag not in {"", "ok", "success"}:
+            return msg or f"broker status {s_flag}"
+        return ""
+
     def _normalize_order_state(self, row: dict[str, Any]) -> str:
         text = str(
             row.get("status")
@@ -567,10 +585,10 @@ class ScannerEngine:
             "validity": "DAY",
             "disclosedQty": 0,
             "offlineOrder": False,
-            # Fyers accepts these for bracket-like target/sl fields in points on some setups.
-            # We send values derived from the current websocket price and user percentages.
-            "stopLoss": stop_delta,
-            "takeProfit": target_delta,
+            # Keep TP/SL as local scanner-managed logic to avoid broker-side validation
+            # issues on regular limit orders ("takeProfit does not match: 0").
+            "stopLoss": 0,
+            "takeProfit": 0,
             "orderTag": "scanner-ui-limit",
         }
         try:
@@ -586,6 +604,18 @@ class ScannerEngine:
                 message="place_order failed",
             )
             raise
+        broker_err = self._broker_response_error_message(response)
+        if broker_err:
+            self._append_order_log(
+                action="place_entry",
+                symbol=symbol_key,
+                side=side_norm,
+                status="error",
+                request_payload=payload,
+                response_payload=response,
+                message=f"broker rejected entry: {broker_err}",
+            )
+            raise RuntimeError(f"entry rejected by broker: {broker_err}")
         order_id = self._extract_order_id(response)
         now_txt = datetime.now(IST_ZONE).strftime("%Y-%m-%d %H:%M:%S")
         trade_id = order_id or f"local-{int(time.time() * 1000)}"
@@ -605,6 +635,7 @@ class ScannerEngine:
                 "status": "pending_entry" if order_id else "active",
                 "close_reason": "",
                 "created_at": now_txt,
+                "filled_at": "",
                 "updated_at": now_txt,
                 "last_price": limit_price,
                 "last_exit_attempt_epoch": 0.0,
@@ -618,7 +649,10 @@ class ScannerEngine:
             status="ok",
             request_payload=payload,
             response_payload=response,
-            message=f"entry_order_id={order_id or '-'}",
+            message=(
+                f"entry_order_id={order_id or '-'} "
+                f"(local_tp={target_price:.2f} local_sl={stop_price:.2f})"
+            ),
         )
         self._push_event(
             f"ORDER {side_norm} {symbol_key} qty={qty} limit={limit_price:.2f} "
@@ -769,6 +803,7 @@ class ScannerEngine:
                             cur = self._managed_trades.get(trade_id)
                             if cur:
                                 cur["status"] = "active"
+                                cur["filled_at"] = now_txt
                                 cur["updated_at"] = now_txt
                                 if fill_price is not None and fill_price > 0:
                                     cur["entry_price"] = round(fill_price, 2)
@@ -780,6 +815,15 @@ class ScannerEngine:
                                     else:
                                         cur["target_price"] = round(max(fill_price * (1 - (tp_pct / 100.0)), 0.0), 2)
                                         cur["stop_loss_price"] = round(fill_price * (1 + (sl_pct / 100.0)), 2)
+                        self._append_order_log(
+                            action="entry_filled",
+                            symbol=symbol,
+                            side=str(trade.get("side") or ""),
+                            status="ok",
+                            request_payload={"entry_order_id": entry_order_id, "trade_id": trade_id},
+                            response_payload=row,
+                            message=f"entry filled at {fill_price if fill_price is not None else '-'}",
+                        )
                         self._push_event(
                             f"ENTRY FILLED {symbol} order={entry_order_id} "
                             f"trade_id={trade_id}"
@@ -792,6 +836,15 @@ class ScannerEngine:
                                 cur["status"] = "entry_failed"
                                 cur["close_reason"] = "entry_rejected_or_cancelled"
                                 cur["updated_at"] = now_txt
+                        self._append_order_log(
+                            action="entry_failed",
+                            symbol=symbol,
+                            side=str(trade.get("side") or ""),
+                            status="error",
+                            request_payload={"entry_order_id": entry_order_id, "trade_id": trade_id},
+                            response_payload=row,
+                            message="entry rejected/cancelled/expired",
+                        )
                         self._push_event(f"ENTRY FAILED {symbol} order={entry_order_id}")
                         continue
 
@@ -806,9 +859,45 @@ class ScannerEngine:
             ltp = self._as_float(tick.get("ltp"))
             if ltp is None:
                 continue
+            side = str(cur.get("side") or "")
+            live_qty = self._position_qty_for_symbol(symbol)
+            expected_sign = 1 if side == "BUY" else (-1 if side == "SELL" else 0)
+            if live_qty == 0:
+                with self._lock:
+                    cur_flat = self._managed_trades.get(trade_id)
+                    if cur_flat:
+                        cur_flat["status"] = "closed"
+                        cur_flat["close_reason"] = "manual_or_external_exit_detected"
+                        cur_flat["updated_at"] = now_txt
+                self._append_order_log(
+                    action="trade_closed",
+                    symbol=symbol,
+                    side=side,
+                    status="ok",
+                    request_payload={"trade_id": trade_id},
+                    response_payload={"net_qty": live_qty},
+                    message="position already flat; auto-exit skipped",
+                )
+                continue
+            if expected_sign and (live_qty * expected_sign) < 0:
+                with self._lock:
+                    cur_flip = self._managed_trades.get(trade_id)
+                    if cur_flip:
+                        cur_flip["status"] = "closed"
+                        cur_flip["close_reason"] = "position_side_reversed_externally"
+                        cur_flip["updated_at"] = now_txt
+                self._append_order_log(
+                    action="trade_closed",
+                    symbol=symbol,
+                    side=side,
+                    status="ok",
+                    request_payload={"trade_id": trade_id},
+                    response_payload={"net_qty": live_qty},
+                    message="position reversed externally; auto-exit skipped",
+                )
+                continue
             target_price = self._as_float(cur.get("target_price"))
             stop_price = self._as_float(cur.get("stop_loss_price"))
-            side = str(cur.get("side") or "")
             hit_target = False
             hit_stop = False
             if side == "BUY":
@@ -842,8 +931,17 @@ class ScannerEngine:
                     cur3 = self._managed_trades.get(trade_id)
                     if cur3:
                         cur3["status"] = "closed"
-                        cur3["close_reason"] = "already_flat"
+                        cur3["close_reason"] = "manual_or_external_exit_detected"
                         cur3["updated_at"] = now_txt
+                self._append_order_log(
+                    action="trade_closed",
+                    symbol=symbol,
+                    side=side,
+                    status="ok",
+                    request_payload={"trade_id": trade_id, "reason": reason},
+                    response_payload={"net_qty": qty_live},
+                    message="trigger hit but position already flat; auto-exit skipped",
+                )
                 continue
             exit_result = self._close_position_market(symbol=symbol, net_qty=qty_live, reason=reason)
             with self._lock:
@@ -1929,6 +2027,12 @@ class ScannerEngine:
                         if len(self._shortlist_events) > SHORTLIST_MAX_EVENTS:
                             self._shortlist_events = self._shortlist_events[-SHORTLIST_MAX_EVENTS:]
                         self._persist_shortlist_state_nolock()
+                        try:
+                            from telegram import send_shortlist_alert
+
+                            send_shortlist_alert(dict(row))
+                        except Exception as exc:  # noqa: BLE001
+                            print(f"[telegram] notify error: {exc}")
                         self._push_event(
                             f"SHORTLISTED {symbol} via {condition_tag} "
                             f"(vtt_diff={diff:.0f}, rel_vol={relative_vol:.2f}x, "
