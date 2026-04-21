@@ -287,6 +287,8 @@
         const tradeSuggestedQty = document.getElementById("trade-suggested-qty");
         const positionsBody = document.getElementById("positions-table-body");
         const activeTrade = { symbol: "", ltp: null, upperCircuit: null, lowerCircuit: null };
+        let lastScannerRows = [];
+        let scannerEmptyStreak = 0;
 
         const applyScannerSymbolFilter = () => {
             if (!tableBody) return;
@@ -589,8 +591,25 @@
                 const resp = await fetch("/api/dashboard-data", { cache: "no-store" });
                 if (!resp.ok) return;
                 const data = await resp.json();
+                const incomingRows = Array.isArray(data.all_symbols) ? data.all_symbols : [];
+                let rowsToRender = incomingRows;
+                if (data.is_started && incomingRows.length === 0 && lastScannerRows.length > 0) {
+                    scannerEmptyStreak += 1;
+                    // Avoid one-off empty snapshots that cause table flicker.
+                    if (scannerEmptyStreak < 3) {
+                        rowsToRender = lastScannerRows;
+                    }
+                } else {
+                    scannerEmptyStreak = 0;
+                    rowsToRender = incomingRows;
+                }
+                if (incomingRows.length > 0) {
+                    lastScannerRows = incomingRows;
+                } else if (!data.is_started) {
+                    lastScannerRows = [];
+                }
                 renderScannerRows(
-                    data.all_symbols || [],
+                    rowsToRender,
                     data.watchlist || [],
                     "No hits yet. Start the scanner and wait for rules to match."
                 );

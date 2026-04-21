@@ -105,9 +105,13 @@ def fyers_chart_url(symbol: str) -> str:
 
 
 def tradingview_chart_url(symbol: str) -> str:
-    """TradingView India chart; symbol is typically NSE:TICKER-EQ."""
-    sym = str(symbol or "").strip()
-    return "https://in.tradingview.com/chart/?" + urllib.parse.urlencode({"symbol": sym})
+    """TradingView India 1-minute chart with NSE symbol."""
+    raw = str(symbol or "").strip()
+    ticker = raw.split(":", 1)[1] if ":" in raw else raw
+    sym = f"NSE:{ticker}" if ticker else "NSE:"
+    return "https://in.tradingview.com/chart/?" + urllib.parse.urlencode(
+        {"symbol": sym, "interval": "1"}
+    )
 
 
 def format_shortlist_message(row: dict[str, Any]) -> str:

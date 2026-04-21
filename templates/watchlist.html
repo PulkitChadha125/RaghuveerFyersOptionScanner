@@ -248,6 +248,8 @@
         const livePill = document.getElementById("live-pill");
         const livePillText = document.getElementById("live-pill-text");
         const activeTrade = { symbol: "", ltp: null, upperCircuit: null, lowerCircuit: null };
+        let lastWatchlistRows = [];
+        let watchlistEmptyStreak = 0;
 
         const openSettingsModal = () => settingsModal?.classList.add("open");
         const closeSettingsModal = () => settingsModal?.classList.remove("open");
@@ -466,7 +468,23 @@
                 const resp = await fetch("/api/watchlist-data", { cache: "no-store" });
                 if (!resp.ok) return;
                 const data = await resp.json();
-                upsertWatchlistRows(data.rows || []);
+                const incomingRows = Array.isArray(data.rows) ? data.rows : [];
+                let rowsToRender = incomingRows;
+                if (data.is_started && incomingRows.length === 0 && lastWatchlistRows.length > 0) {
+                    watchlistEmptyStreak += 1;
+                    if (watchlistEmptyStreak < 3) {
+                        rowsToRender = lastWatchlistRows;
+                    }
+                } else {
+                    watchlistEmptyStreak = 0;
+                    rowsToRender = incomingRows;
+                }
+                if (incomingRows.length > 0) {
+                    lastWatchlistRows = incomingRows;
+                } else if (!data.is_started) {
+                    lastWatchlistRows = [];
+                }
+                upsertWatchlistRows(rowsToRender);
 
                 if (livePill && livePillText) {
                     if (data.is_started) {
