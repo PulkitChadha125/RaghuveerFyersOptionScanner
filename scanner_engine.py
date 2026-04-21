@@ -605,7 +605,7 @@ class ScannerEngine:
             # issues on regular limit orders ("takeProfit does not match: 0").
             "stopLoss": 0,
             "takeProfit": 0,
-            "orderTag": "scanner-ui-limit",
+            "orderTag": "scanneruilimit",
         }
         try:
             response = client.place_order(data=payload)
@@ -719,7 +719,7 @@ class ScannerEngine:
             "offlineOrder": False,
             "stopLoss": 0,
             "takeProfit": 0,
-            "orderTag": "scanner-auto-exit",
+            "orderTag": "scannerautoexit",
         }
         try:
             response = client.place_order(data=payload)
