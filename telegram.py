@@ -105,10 +105,16 @@ def fyers_chart_url(symbol: str) -> str:
 
 
 def tradingview_chart_url(symbol: str) -> str:
-    """TradingView India 1-minute chart with NSE symbol."""
+    """TradingView India 1-minute chart with NSE symbol (EQ suffix removed)."""
     raw = str(symbol or "").strip()
-    ticker = raw.split(":", 1)[1] if ":" in raw else raw
-    sym = f"NSE:{ticker}" if ticker else "NSE:"
+    if ":" in raw:
+        ticker = raw.split(":", 1)[1]
+    else:
+        ticker = raw
+    # "-EQ" को हटाएँ (केस-इनसेंसिटिव)
+    import re
+    ticker = re.sub(r"-EQ$", "", ticker, flags=re.IGNORECASE)
+    sym = f"NSE:{ticker}"
     return "https://in.tradingview.com/chart/?" + urllib.parse.urlencode(
         {"symbol": sym, "interval": "1"}
     )
@@ -118,21 +124,21 @@ def format_shortlist_message(row: dict[str, Any]) -> str:
     """Build plain-text message with stats + chart links."""
     symbol = row.get("symbol") or "-"
     lines = [
-        "<b>RiverFlowScanner — New shortlist</b>",
+        "<b>RiverFlowScanner — New Shortlist </b>",
         "",
-        f"<b>Symbol</b>: <code>{_escape_html(symbol)}</code>",
-        f"<b>Time</b>: {_escape_html(str(row.get('time') or '-'))}",
-        f"<b>LTP</b>: {_escape_html(str(row.get('ltp') or '-'))}",
-        f"<b>% Chg</b>: {_escape_html(str(row.get('change_pct') or '-'))}",
-        f"<b>Rel Vol</b>: {_escape_html(str(row.get('relative_vol') or '-'))}x",
-        f"<b>Value (Cr)</b>: {_escape_html(str(row.get('trade_value_cr') or '-'))}",
-        f"<b>Rule</b>: {_escape_html(str(row.get('condition') or '-'))}",
-        f"<b>Hit #</b>: {_escape_html(str(row.get('hits') or '-'))}",
-        f"<b>VTT Δ</b>: {_escape_html(str(row.get('metric_value') or '-'))}",
+        f"✧<b>Symbol</b> : <code>{_escape_html(symbol)}</code>",
+        f"✧<b>Time</b>   : {_escape_html(str(row.get('time') or '-'))}",
+        f"✧<b>LTP</b>   : {_escape_html(str(row.get('ltp') or '-'))}",
+        f"✧<b>% Chg</b> : {_escape_html(str(row.get('change_pct') or '-'))}",
+        f"✧<b>Rel Vol</b>: {_escape_html(str(row.get('relative_vol') or '-'))}x",
+        f"✧<b>Value (Cr)</b>: {_escape_html(str(row.get('trade_value_cr') or '-'))}",
+        f"✧<b>Rule</b>  : {_escape_html(str(row.get('condition') or '-'))}",
+        f"✧<b>Hit #</b>: {_escape_html(str(row.get('hits') or '-'))}",
+        f"✧<b>VTT Δ</b> : {_escape_html(str(row.get('metric_value') or '-'))}",
         "",
         "<b>Charts</b>",
-        f'• <a href="{_escape_attr(fyers_chart_url(symbol))}">FYERS</a>',
-        f'• <a href="{_escape_attr(tradingview_chart_url(symbol))}">TradingView</a>',
+        f'📈 • <a href="{_escape_attr(fyers_chart_url(symbol))}">FYERS</a>',
+        f'📈 • <a href="{_escape_attr(tradingview_chart_url(symbol))}">TradingView</a>',
     ]
     return "\n".join(lines)
 

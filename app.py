@@ -394,9 +394,15 @@ def order_logs_api():
 @login_required
 def symbol_ltp_api():
     symbol = str(request.args.get("symbol", "")).strip()
+    fetch_depth_once = str(request.args.get("fetch_depth_once", "")).strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
     if not symbol:
         return jsonify({"ok": False, "error": "symbol is required"}), 400
-    quote = ENGINE.latest_quote_for_symbol(symbol)
+    quote = ENGINE.latest_quote_for_symbol(symbol, fetch_depth_once=fetch_depth_once)
     if not quote:
         return jsonify({"ok": False, "symbol": symbol, "ltp": None}), 404
 
@@ -493,5 +499,8 @@ def exit_position_api():
 
 
 if __name__ == "__main__":
+    # 🔥 शेड्यूलर चालू करें — रोज़ 08:15 पर सेशन क्लियर और 08:45 पर ऑटो स्टार्ट
+    ENGINE.start_daily_scheduler(sma_period_rule1=1125, sma_period_rule2=1125)
+
     threading.Timer(1.0, lambda: webbrowser.open("http://127.0.0.1:5001")).start()
     app.run(host="0.0.0.0", port=5001, debug=True, use_reloader=False, threaded=True)

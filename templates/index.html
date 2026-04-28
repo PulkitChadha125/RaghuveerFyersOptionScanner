@@ -4,6 +4,8 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>RiverFlowScanner</title>
+    <link rel="manifest" href="{{ url_for('static', filename='manifest.json') }}">
+    <link rel="icon" href="{{ url_for('static', filename='logo-192.png') }}">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700&display=swap" rel="stylesheet">
@@ -217,12 +219,12 @@
                 <form id="trade-form">
                     <div class="settings-criteria-row">
                         <label for="trade-target-pct">Target %</label>
-                        <input type="number" min="0" step="0.01" id="trade-target-pct" value="1.00" required>
+                        <input type="number" min="0" step="0.01" id="trade-target-pct" value="5.00" required>
                         <span class="criteria-suffix">%</span>
                     </div>
                     <div class="settings-criteria-row">
                         <label for="trade-stop-pct">Stop-loss %</label>
-                        <input type="number" min="0" step="0.01" id="trade-stop-pct" value="0.50" required>
+                        <input type="number" min="0" step="0.01" id="trade-stop-pct" value="1.25" required>
                         <span class="criteria-suffix">%</span>
                     </div>
                     <div class="settings-criteria-row">
@@ -231,7 +233,7 @@
                     </div>
                     <div class="settings-criteria-row">
                         <label for="trade-capital">Capital (Rs)</label>
-                        <input type="number" min="1" step="1" id="trade-capital" value="100000">
+                        <input type="number" min="1" step="1" id="trade-capital" value="300000">
                     </div>
                     <div class="settings-criteria-row">
                         <label for="trade-risk-pct">Risk %</label>
@@ -451,10 +453,13 @@
             recomputeRiskModel();
         };
 
-        const refreshActiveTradeLtp = async () => {
+        const refreshActiveTradeLtp = async ({ fetchDepthOnce = false } = {}) => {
             if (!activeTrade.symbol) return;
             try {
                 const params = new URLSearchParams({ symbol: activeTrade.symbol });
+                if (fetchDepthOnce) {
+                    params.set("fetch_depth_once", "1");
+                }
                 const resp = await fetch(`/api/symbol-ltp?${params.toString()}`, { cache: "no-store" });
                 if (!resp.ok) return;
                 const data = await resp.json();
@@ -492,7 +497,7 @@
             }
             fillTradeHint();
             openTradeModal();
-            refreshActiveTradeLtp();
+            refreshActiveTradeLtp({ fetchDepthOnce: true });
         };
         tableBody?.addEventListener("click", handleRowAction);
 
@@ -641,6 +646,11 @@
             if (tradeModal?.classList.contains("open")) refreshActiveTradeLtp();
         }, 1000);
         applyScannerSymbolFilter();
+    </script>
+    <script>
+        if ('serviceWorker' in navigator) {
+            navigator.serviceWorker.register("{{ url_for('static', filename='sw.js') }}");
+        }
     </script>
 </body>
 </html>

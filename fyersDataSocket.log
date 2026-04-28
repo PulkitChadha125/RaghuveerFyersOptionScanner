@@ -4,3 +4,16 @@
 {"level":"ERROR","location":"[__symbol_conversion:1374] data_ws","message":"'NoneType' object is not subscriptable","timestamp":"2026-04-09 13:01:58,427+0530","service":"FyersDataSocket","exception":"Traceback (most recent call last):\n  File \"D:\\Desktop\\python projects\\RaghuveerFyersScanner\\.venv\\Lib\\site-packages\\fyers_apiv3\\FyersWebsocket\\data_ws.py\", line 1333, in __symbol_conversion\n    if symbol_value[3] != \"\":\n       ~~~~~~~~~~~~^^^\nTypeError: 'NoneType' object is not subscriptable","exception_name":"TypeError"}
 {"level":"ERROR","location":"[<lambda>:1663] data_ws","message":"Connection to remote host was lost.","timestamp":"2026-04-14 13:33:22,584+0530","service":"FyersDataSocket"}
 {"level":"ERROR","location":"[<lambda>:1663] data_ws","message":"Connection to remote host was lost.","timestamp":"2026-04-14 14:01:39,378+0530","service":"FyersDataSocket"}
+{"level":"ERROR","location":"[<lambda>:1663] data_ws","message":"Connection to remote host was lost.","timestamp":"2026-04-21 21:48:36,030+0530","service":"FyersDataSocket"}
+{"level":"ERROR","location":"[<lambda>:1663] data_ws","message":"Connection to remote host was lost.","timestamp":"2026-04-22 10:36:46,103+0530","service":"FyersDataSocket"}
+{"level":"ERROR","location":"[<lambda>:1663] data_ws","message":"Connection to remote host was lost.","timestamp":"2026-04-22 14:07:29,853+0530","service":"FyersDataSocket"}
+{"level":"ERROR","location":"[<lambda>:1663] data_ws","message":"Connection to remote host was lost.","timestamp":"2026-04-23 23:43:53,823+0530","service":"FyersDataSocket"}
+{"level":"ERROR","location":"[<lambda>:1663] data_ws","message":"Connection to remote host was lost.","timestamp":"2026-04-24 03:16:17,198+0530","service":"FyersDataSocket"}
+{"level":"ERROR","location":"[access_token_to_hsmtoken:272] data_ws","message":{"type":"cn","code":-99,"message":"Token is expired","s":"error"},"timestamp":"2026-04-24 07:47:07,212+0530","service":"FyersDataSocket"}
+{"level":"ERROR","location":"[<lambda>:1663] data_ws","message":"Connection to remote host was lost.","timestamp":"2026-04-24 10:19:39,763+0530","service":"FyersDataSocket"}
+{"level":"ERROR","location":"[<lambda>:1663] data_ws","message":"Connection to remote host was lost.","timestamp":"2026-04-24 20:35:47,393+0530","service":"FyersDataSocket"}
+{"level":"ERROR","location":"[<lambda>:1663] data_ws","message":"Connection to remote host was lost.","timestamp":"2026-04-27 18:35:36,338+0530","service":"FyersDataSocket"}
+{"level":"ERROR","location":"[<lambda>:1663] data_ws","message":"Connection to remote host was lost.","timestamp":"2026-04-28 02:25:53,791+0530","service":"FyersDataSocket"}
+{"level":"ERROR","location":"[<lambda>:1663] data_ws","message":"Connection to remote host was lost.","timestamp":"2026-04-28 04:08:14,433+0530","service":"FyersDataSocket"}
+{"level":"ERROR","location":"[<lambda>:1663] data_ws","message":"Connection to remote host was lost.","timestamp":"2026-04-28 05:03:56,657+0530","service":"FyersDataSocket"}
+{"level":"ERROR","location":"[access_token_to_hsmtoken:272] data_ws","message":{"type":"cn","code":-99,"message":"Token is expired","s":"error"},"timestamp":"2026-04-28 07:47:06,488+0530","service":"FyersDataSocket"}

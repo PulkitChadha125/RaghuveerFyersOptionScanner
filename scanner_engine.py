@@ -7,6 +7,7 @@ import sqlite3
 import subprocess
 import threading
 import time
+import requests
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -33,9 +34,9 @@ BOOTSTRAP_SYMBOL_LIMIT = 0
 RATE_LIMIT_COOLDOWN_SECS = 30
 FETCH_INTERVAL_SECS = 0.3
 AUTO_LOGIN_AND_HISTORY_HOUR_IST = 8
-AUTO_LOGIN_AND_HISTORY_MINUTE_IST = 0
-AUTO_WS_START_HOUR_IST = 9
-AUTO_WS_START_MINUTE_IST = 15
+AUTO_LOGIN_AND_HISTORY_MINUTE_IST = 30
+AUTO_WS_START_HOUR_IST = 8
+AUTO_WS_START_MINUTE_IST = 45
 IST_ZONE = ZoneInfo("Asia/Kolkata")
 LOG_WS_TICK_LATENCY = False
 # Fyers SDK appends each subscribe to internal scrips_per_channel; unsubscribe first on resubscribe.
@@ -178,6 +179,9 @@ class ScannerEngine:
         self._ws_raw_log_window_sec: int = 0
         self._ws_raw_log_count: int = 0
         self._trade_client: Any | None = None
+        self._fyers_app_id: str = ""
+        self._fyers_access_token: str = ""
+        self._depth_cache_by_symbol: dict[str, dict[str, float | None]] = {}
         self._managed_trades: dict[str, dict[str, Any]] = {}
         self._order_logs: list[dict[str, Any]] = []
         self._trade_monitor_thread: threading.Thread | None = None
@@ -294,7 +298,7 @@ class ScannerEngine:
                 daemon=True,
             )
             self._scheduler_thread.start()
-        self._push_event("Daily auto scheduler enabled (08:00 prep, 09:15 websocket IST).")
+        self._push_event("Daily auto scheduler enabled (08:30 prep, 08:45 websocket IST).")
 
     def stop_daily_scheduler(self) -> None:
         self._scheduler_stop_event.set()
@@ -655,8 +659,11 @@ class ScannerEngine:
                 "updated_at": now_txt,
                 "last_price": limit_price,
                 "last_exit_attempt_epoch": 0.0,
+                "last_exit_modify_attempt_epoch": 0.0,
                 "last_modify_attempt_epoch": 0.0,
                 "last_modified_price": limit_price,
+                "exit_side": "",
+                "last_exit_limit_price": 0.0,
             }
         self._append_order_log(
             action="place_entry",
@@ -701,18 +708,28 @@ class ScannerEngine:
             client = self._trade_client
             tick = self._last_tick_by_symbol.get(symbol_key) or {}
             ltp = self._as_float(tick.get("ltp")) or 0.0
+            bid = self._as_float(tick.get("bid_price"))
+            ask = self._as_float(tick.get("ask_price"))
         if client is None:
             raise RuntimeError("trading client unavailable")
 
         side_num = -1 if net_qty > 0 else 1
         qty = abs(int(net_qty))
+        exit_side = "SELL" if side_num < 0 else "BUY"
+        # Limit exits: SELL at bid, BUY at ask.
+        desired = bid if exit_side == "SELL" else ask
+        if desired is None or desired <= 0:
+            desired = ltp
+        if desired is None or desired <= 0:
+            raise RuntimeError(f"unable to derive exit limit price for {symbol_key}")
+        desired = round(float(desired), 2)
         payload = {
             "symbol": symbol_key,
             "qty": qty,
-            "type": 2,  # Market exit
+            "type": 1,  # Limit exit
             "side": side_num,
             "productType": "INTRADAY",
-            "limitPrice": 0,
+            "limitPrice": desired,
             "stopPrice": 0,
             "validity": "DAY",
             "disclosedQty": 0,
@@ -727,18 +744,30 @@ class ScannerEngine:
             self._append_order_log(
                 action="exit_position",
                 symbol=symbol_key,
-                side="SELL" if side_num < 0 else "BUY",
+                side=exit_side,
                 status="error",
                 request_payload=payload,
                 response_payload={"error": str(exc)},
                 message=f"exit failed ({reason})",
             )
             raise
+        broker_err = self._broker_response_error_message(response)
+        if broker_err:
+            self._append_order_log(
+                action="exit_position",
+                symbol=symbol_key,
+                side=exit_side,
+                status="error",
+                request_payload=payload,
+                response_payload=response,
+                message=f"broker rejected exit ({reason}): {broker_err}",
+            )
+            raise RuntimeError(f"exit rejected by broker: {broker_err}")
         exit_order_id = self._extract_order_id(response)
         self._append_order_log(
             action="exit_position",
             symbol=symbol_key,
-            side="SELL" if side_num < 0 else "BUY",
+            side=exit_side,
             status="ok",
             request_payload=payload,
             response_payload=response,
@@ -746,14 +775,15 @@ class ScannerEngine:
         )
         self._push_event(
             f"EXIT {symbol_key} qty={qty} reason={reason} "
-            f"(side={'SELL' if side_num < 0 else 'BUY'}, ltp={ltp:.2f})"
+            f"(side={exit_side}, limit={desired:.2f}, ltp={ltp:.2f})"
         )
         return {
             "ok": True,
             "symbol": symbol_key,
             "qty": qty,
-            "exit_side": "SELL" if side_num < 0 else "BUY",
+            "exit_side": exit_side,
             "exit_order_id": exit_order_id,
+            "exit_limit_price": desired,
             "broker_response": response,
         }
 
@@ -768,11 +798,16 @@ class ScannerEngine:
                     continue
                 if trade.get("status") in {"closed", "entry_failed"}:
                     continue
-                trade["status"] = "closed"
+                trade["status"] = "pending_exit"
                 trade["close_reason"] = "manual_exit"
                 trade["updated_at"] = now_txt
                 if result.get("exit_order_id"):
                     trade["exit_order_id"] = result.get("exit_order_id")
+                if result.get("exit_side"):
+                    trade["exit_side"] = str(result.get("exit_side"))
+                trade["last_exit_limit_price"] = self._as_float(
+                    result.get("exit_limit_price")
+                ) or 0.0
         self.net_positions_snapshot(force_refresh=True)
         return result
 
@@ -863,6 +898,52 @@ class ScannerEngine:
                         )
                         self._push_event(f"ENTRY FAILED {symbol} order={entry_order_id}")
                         continue
+
+            if status == "pending_exit":
+                exit_order_id = str(trade.get("exit_order_id") or "")
+                qty_live = self._position_qty_for_symbol(symbol)
+                if qty_live == 0:
+                    with self._lock:
+                        cur_done = self._managed_trades.get(trade_id)
+                        if cur_done:
+                            cur_done["status"] = "closed"
+                            cur_done["updated_at"] = now_txt
+                            if not str(cur_done.get("close_reason") or "").strip():
+                                cur_done["close_reason"] = "exit_filled"
+                    continue
+                if exit_order_id:
+                    row = self._find_order_row_by_id(client, exit_order_id)
+                    if row:
+                        exit_state = self._normalize_order_state(row)
+                        if exit_state == "open":
+                            self._modify_open_exit_to_best_price(client=client, trade_id=trade_id)
+                            continue
+                        if exit_state == "filled":
+                            with self._lock:
+                                cur_done2 = self._managed_trades.get(trade_id)
+                                if cur_done2:
+                                    cur_done2["status"] = "closed"
+                                    cur_done2["updated_at"] = now_txt
+                                    if not str(cur_done2.get("close_reason") or "").strip():
+                                        cur_done2["close_reason"] = "exit_filled"
+                            continue
+                        if exit_state == "closed_bad":
+                            with self._lock:
+                                cur_retry = self._managed_trades.get(trade_id)
+                                if cur_retry:
+                                    cur_retry["status"] = "active"
+                                    cur_retry["updated_at"] = now_txt
+                                    cur_retry["exit_order_id"] = None
+                            self._append_order_log(
+                                action="exit_position",
+                                symbol=symbol,
+                                side=str(trade.get("exit_side") or ""),
+                                status="error",
+                                request_payload={"trade_id": trade_id, "exit_order_id": exit_order_id},
+                                response_payload=row,
+                                message="exit order failed; reverting to active for retry",
+                            )
+                continue
 
             if status != "active":
                 continue
@@ -963,10 +1044,14 @@ class ScannerEngine:
             with self._lock:
                 cur4 = self._managed_trades.get(trade_id)
                 if cur4:
-                    cur4["status"] = "closed"
+                    cur4["status"] = "pending_exit"
                     cur4["close_reason"] = reason
                     cur4["updated_at"] = now_txt
                     cur4["exit_order_id"] = exit_result.get("exit_order_id")
+                    cur4["exit_side"] = str(exit_result.get("exit_side") or "")
+                    cur4["last_exit_limit_price"] = self._as_float(
+                        exit_result.get("exit_limit_price")
+                    ) or 0.0
             self.net_positions_snapshot(force_refresh=True)
 
     def _modify_open_entry_to_best_price(self, client: Any, trade_id: str) -> None:
@@ -1040,6 +1125,76 @@ class ScannerEngine:
             request_payload=payload,
             response_payload=response,
             message=f"entry_order_id={entry_order_id}",
+        )
+
+    def _modify_open_exit_to_best_price(self, client: Any, trade_id: str) -> None:
+        with self._lock:
+            trade = self._managed_trades.get(trade_id)
+            if not trade:
+                return
+            now_epoch = time.monotonic()
+            last_attempt = self._as_float(trade.get("last_exit_modify_attempt_epoch")) or 0.0
+            if now_epoch - last_attempt < 2.0:
+                return
+            trade["last_exit_modify_attempt_epoch"] = now_epoch
+            symbol = str(trade.get("symbol") or "").strip()
+            side = str(trade.get("exit_side") or "").strip().upper()
+            qty = abs(int(self._position_qty_for_symbol(symbol) or 0))
+            exit_order_id = str(trade.get("exit_order_id") or "").strip()
+            tick = self._last_tick_by_symbol.get(symbol) or {}
+            bid = self._as_float(tick.get("bid_price"))
+            ask = self._as_float(tick.get("ask_price"))
+            ltp = self._as_float(tick.get("ltp"))
+            prev_price = self._as_float(trade.get("last_exit_limit_price"))
+
+        if not exit_order_id or side not in {"BUY", "SELL"} or qty <= 0:
+            return
+        desired = bid if side == "SELL" else ask
+        if desired is None or desired <= 0:
+            desired = ltp
+        if desired is None or desired <= 0:
+            return
+        desired = round(float(desired), 2)
+        if prev_price is not None and abs(float(prev_price) - desired) < 0.01:
+            return
+
+        payload = {
+            "id": exit_order_id,
+            "type": 1,
+            "qty": qty,
+            "limitPrice": desired,
+            "stopPrice": 0,
+        }
+        try:
+            response = client.modify_order(data=payload)
+        except TypeError:
+            response = client.modify_order(payload)
+        except Exception as exc:  # noqa: BLE001
+            self._append_order_log(
+                action="modify_exit",
+                symbol=symbol,
+                side=side,
+                status="error",
+                request_payload=payload,
+                response_payload={"error": str(exc)},
+                message="modify_exit failed",
+            )
+            return
+
+        now_txt = datetime.now(IST_ZONE).strftime("%Y-%m-%d %H:%M:%S")
+        with self._lock:
+            cur = self._managed_trades.get(trade_id)
+            if cur:
+                cur["updated_at"] = now_txt
+                cur["last_exit_limit_price"] = desired
+        self._append_order_log(
+            action="modify_exit",
+            symbol=symbol,
+            side=side,
+            status="ok",
+            request_payload=payload,
+            response_payload=response,
+            message=f"exit_order_id={exit_order_id}",
         )
 
     def _persist_shortlist_state_nolock(self) -> None:
@@ -1138,6 +1293,9 @@ class ScannerEngine:
             self._disconnect_ws()
             self._close_stale_process()
             self._trade_client = None
+            self._fyers_app_id = ""
+            self._fyers_access_token = ""
+            self._depth_cache_by_symbol = {}
             self.status.is_running = False
             self.status.last_message = "Stopped"
             self._push_event("Pipeline stopped by user.")
@@ -1194,15 +1352,23 @@ class ScannerEngine:
         finally:
             self._lock.release()
 
-    def latest_quote_for_symbol(self, symbol: str) -> dict[str, float | None] | None:
+    def latest_quote_for_symbol(
+        self,
+        symbol: str,
+        *,
+        fetch_depth_once: bool = False,
+    ) -> dict[str, float | None] | None:
         symbol_key = str(symbol or "").strip()
         if not symbol_key:
             return None
+        if fetch_depth_once:
+            self._fetch_depth_snapshot_once(symbol_key)
         if not self._try_acquire_lock(timeout_secs=1.0):
             return None
         try:
             tick = self._last_tick_by_symbol.get(symbol_key) or {}
-            if not tick:
+            depth_cached = self._depth_cache_by_symbol.get(symbol_key, {})
+            if not tick and not depth_cached:
                 return None
 
             def pick_float(*keys: str) -> float | None:
@@ -1215,15 +1381,84 @@ class ScannerEngine:
                         continue
                 return None
 
+            def from_depth(name: str) -> float | None:
+                raw = depth_cached.get(name)
+                try:
+                    return float(raw) if raw is not None else None
+                except (TypeError, ValueError):
+                    return None
+
             return {
-                "ltp": pick_float("ltp"),
-                "upper_circuit": pick_float("upper_circuit", "upper_ckt", "uc", "uc_price"),
-                "lower_circuit": pick_float("lower_circuit", "lower_ckt", "lc", "lc_price"),
-                "bid_price": pick_float("bid_price"),
-                "ask_price": pick_float("ask_price"),
+                "ltp": pick_float("ltp") or from_depth("ltp"),
+                "upper_circuit": (
+                    pick_float("upper_circuit", "upper_ckt", "uc", "uc_price")
+                    or from_depth("upper_ckt")
+                ),
+                "lower_circuit": (
+                    pick_float("lower_circuit", "lower_ckt", "lc", "lc_price")
+                    or from_depth("lower_ckt")
+                ),
+                "bid_price": pick_float("bid_price") or from_depth("bid_price"),
+                "ask_price": pick_float("ask_price") or from_depth("ask_price"),
             }
         finally:
             self._lock.release()
+
+    def _fyers_depth_auth_header(self) -> str:
+        app_id = str(self._fyers_app_id or "").strip()
+        token = str(self._fyers_access_token or "").strip()
+        if not token:
+            return ""
+        # Some SDK flows already return "app_id:token" as access token.
+        if ":" in token:
+            return token
+        if not app_id:
+            return token
+        return f"{app_id}:{token}"
+
+    def _fetch_depth_snapshot_once(self, symbol: str) -> None:
+        symbol_key = str(symbol or "").strip()
+        if not symbol_key:
+            return
+        with self._lock:
+            if symbol_key in self._depth_cache_by_symbol:
+                return
+            auth = self._fyers_depth_auth_header()
+        if not auth:
+            return
+        url = "https://api-t1.fyers.in/data/depth"
+        try:
+            resp = requests.get(
+                url,
+                params={"symbol": symbol_key, "ohlcv_flag": 1},
+                headers={"Authorization": auth},
+                timeout=8,
+            )
+            payload = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else {}
+        except Exception as exc:  # noqa: BLE001
+            self._push_event(f"Depth fetch failed for {symbol_key}: {exc}")
+            return
+        if not resp.ok or str(payload.get("s") or "").lower() != "ok":
+            msg = str(payload.get("message") or resp.text[:200] or "unknown")
+            self._push_event(f"Depth fetch rejected for {symbol_key}: {msg}")
+            return
+        d = payload.get("d") or {}
+        item = d.get(symbol_key) if isinstance(d, dict) else None
+        if not isinstance(item, dict):
+            return
+        bids = item.get("bids") or []
+        asks = item.get("ask") or []
+        bid0 = bids[0] if isinstance(bids, list) and bids else {}
+        ask0 = asks[0] if isinstance(asks, list) and asks else {}
+        snap = {
+            "upper_ckt": self._as_float(item.get("upper_ckt")),
+            "lower_ckt": self._as_float(item.get("lower_ckt")),
+            "ltp": self._as_float(item.get("ltp")),
+            "bid_price": self._as_float(bid0.get("price")) if isinstance(bid0, dict) else None,
+            "ask_price": self._as_float(ask0.get("price")) if isinstance(ask0, dict) else None,
+        }
+        with self._lock:
+            self._depth_cache_by_symbol[symbol_key] = snap
 
     def _sample_data_meta_nolock(self) -> dict[str, Any]:
         return {
@@ -1415,6 +1650,10 @@ class ScannerEngine:
             if not self._is_active(run_id):
                 return
             self._trade_client = fyers
+            creds = self._load_fyers_credentials_csv()
+            self._fyers_app_id = str(creds.get("client_id") or "").strip()
+            self._fyers_access_token = str(access_token or "").strip()
+            self._depth_cache_by_symbol = {}
 
             self._set_message("Fetching historical candles + SMA...", run_id)
             rows = self._fetch_and_build_snapshots(
